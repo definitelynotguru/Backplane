@@ -661,7 +661,8 @@ pub(super) fn corner(
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use super::{State, SIDES};
+    use serde_json::json;
 
     #[test]
     fn default_and_directional_add_use_the_acted_tiles_current_size() {
