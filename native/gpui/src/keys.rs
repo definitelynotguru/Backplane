@@ -409,7 +409,7 @@ impl Backplane {
         let kept = thread["viewer"]["probe"].as_str().is_some_and(|p| !p.is_empty());
         let lit = [0, 1, 2].map(|id| { let p = &self.screens.plots[id]; p.picked.is_some() || p.card.is_some() || !p.lit.is_empty() });
         let viewer = &thread["viewer"];
-        let tiled = viewer["tiled"] == true;
+        let tiled = crate::screens::viewer::is_tiled(viewer);
         let tiles: Vec<_> = viewer["tiles"].as_object().into_iter().flatten().map(|(id, _)| {
             let visible = viewer["layout"]["maximized"].as_str().is_none_or(|shown| shown == id);
             let plot_lit = self.screens.plots.tile_slot(id).is_some_and(|slot| {
