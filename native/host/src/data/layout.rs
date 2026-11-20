@@ -17,8 +17,8 @@ use std::collections::{BTreeSet, HashMap};
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, OnceLock};
 
-/// Most tiles one layout holds (the hub's own limit lands with PR 1461's `layout::MAX_TILES`; the same number).
-pub const MAX_TILES: usize = 8;
+/// Most tiles one layout holds: the hub's own limit.
+pub const MAX_TILES: usize = layout::MAX_TILES;
 /// A device keeps layouts for this many threads (least recently used first out) and the hub for this many devices.
 const THREADS_PER_DEVICE: usize = 32;
 const DEVICES: usize = 64;
@@ -43,6 +43,8 @@ pub struct Store {
     clients: Mutex<HashMap<u64, String>>,
     /// (device, thread) → the connections that read this layout and are told when it changes
     watchers: Mutex<HashMap<(String, String), BTreeSet<u64>>>,
+    /// connections holding a layout's watch set (`viewer.watch {kind:"layout"}`): another watch on one lets the set go
+    holding: Mutex<BTreeSet<u64>>,
     file: Option<PathBuf>,
     tick: std::sync::atomic::AtomicU64,
     pruned: std::sync::atomic::AtomicU64,
@@ -65,7 +67,7 @@ fn s<'a>(v: &'a Value, k: &str) -> &'a str { v.get(k).and_then(Value::as_str).un
 impl Store {
     pub fn new() -> Store { Store::open(None) }
     pub fn open(file: Option<PathBuf>) -> Store {
-        let st = Store { entries: Mutex::new(HashMap::new()), clients: Mutex::new(HashMap::new()), watchers: Mutex::new(HashMap::new()), file, tick: 0.into(), pruned: 0.into() };
+        let st = Store { entries: Mutex::new(HashMap::new()), clients: Mutex::new(HashMap::new()), watchers: Mutex::new(HashMap::new()), holding: Mutex::new(BTreeSet::new()), file, tick: 0.into(), pruned: 0.into() };
         if let Some(f) = &st.file { st.load(f) }
         st
     }
@@ -141,7 +143,10 @@ impl Store {
     pub fn forget_client(&self, client: u64) {
         self.clients.lock().unwrap().remove(&client);
         for w in self.watchers.lock().unwrap().values_mut() { w.remove(&client); }
+        self.holding.lock().unwrap().remove(&client);
     }
+    pub fn hold(&self, client: u64, on: bool) { let mut h = self.holding.lock().unwrap(); if on { h.insert(client); } else { h.remove(&client); } }
+    pub fn holds(&self, client: u64) -> bool { self.holding.lock().unwrap().contains(&client) }
     fn watch(&self, device: &str, thread: &str, client: u64) { self.watchers.lock().unwrap().entry((device.to_string(), thread.to_string())).or_default().insert(client); }
     /// The connections of `device` watching `thread`.
     pub fn watchers_of(&self, device: &str, thread: &str) -> Vec<u64> { self.watchers.lock().unwrap().get(&(device.to_string(), thread.to_string())).map(|w| w.iter().copied().collect()).unwrap_or_default() }
@@ -187,9 +192,8 @@ impl Refused {
     pub fn to_value(&self) -> Value { json!({"code": self.code, "key": self.key, "message": self.text}) }
 }
 
-const LINKED: &str = "That layout is shown on its own machine only for now.";
-/// Refusals data/1 adds to the hub's own (catalog keys follow PR 1461's; English until they are in the catalogs).
-fn extra(code: &'static str, key: &'static str, text: &'static str) -> Refused { Refused { code, key, text } }
+/// Refusals only a device can meet, with their own catalog keys (the text is the catalog's, in the hub's language, set when the refusal leaves `call`).
+fn extra(code: &'static str, key: &'static str) -> Refused { Refused { code, key, text: layout::catalog_text(key, "en").unwrap_or(code) } }
 
 /// Check a `source` a client names: it must be a path inside the project's folder (never absolute, never leaving it, no symlink out) that exists.
 pub fn safe_source(root: &str, source: &str) -> Result<String, Refused> {
@@ -263,7 +267,7 @@ pub fn read(st: &crate::state::State, store: &Store, device: &str, thread: &str,
 }
 
 fn check_thread(st: &crate::state::State, thread: &str) -> Result<(), Refused> {
-    if thread.contains('~') { return Err(extra("linked", "viewer.layout.refusal.linked", LINKED)) }
+    if thread.contains('~') { return Err(extra("linked", "viewer.layout.refusal.linked")) }
     if !st.threads.contains_key(thread) { return Err(Refused::of(Refusal::NotFound)) }
     Ok(())
 }
@@ -276,7 +280,7 @@ fn action_of(op: &str, p: &Value, root: &str, bounds: (f32, f32)) -> Result<(&'s
     Ok(match op {
         "add" => {
             let kind = str_of("kind")?.ok_or_else(bad)?;
-            if !kind_ok(&kind) { return Err(extra("notOnDevice", "viewer.layout.refusal.notondevice", "That cannot be a tile here.")) }
+            if !kind_ok(&kind) { return Err(extra("notOnDevice", "viewer.layout.refusal.notondevice")) }
             let mut v = json!({"kind": kind});
             if let Some(side) = str_of("side")? { v["side"] = json!(side) }
             if let Some(t) = str_of("target")? { v["target"] = json!(t) }
@@ -310,7 +314,7 @@ fn action_of(op: &str, p: &Value, root: &str, bounds: (f32, f32)) -> Result<(&'s
                 Some(ov) if ov.is_object() => {
                     let mut o = ov.clone();
                     let kind = ov["kind"].as_str().ok_or_else(bad)?;
-                    if !kind_ok(kind) { return Err(extra("notOnDevice", "viewer.layout.refusal.notondevice", "That cannot be a tile here.")) }
+                    if !kind_ok(kind) { return Err(extra("notOnDevice", "viewer.layout.refusal.notondevice")) }
                     if let Some(src) = ov.get("source").and_then(Value::as_str) { o["source"] = json!(safe_source(root, src)?) }
                     v["overlay"] = o;
                 }
@@ -334,7 +338,7 @@ pub fn act(st: &crate::state::State, store: &Store, device: &str, thread: &str, 
     // a layout never holds more tiles than the limit, whatever an op adds
     let out = if op == "show" {
         let kind = s(p, "kind");
-        if kind != "split" && !TILE_KINDS.contains(&kind) { return Err(extra("notOnDevice", "viewer.layout.refusal.notondevice", "That cannot be a tile here.")) }
+        if kind != "split" && !TILE_KINDS.contains(&kind) { return Err(extra("notOnDevice", "viewer.layout.refusal.notondevice")) }
         if let Some(src) = p.get("source").and_then(Value::as_str) { safe_source(root, src)?; }
         viewer::view_action_for(st, "", &session, None, locale, kind, 0)
     } else {
@@ -351,7 +355,7 @@ pub fn act(st: &crate::state::State, store: &Store, device: &str, thread: &str, 
     let mut after_session = session.clone();
     crate::session::patch::merge(&mut after_session, &vo.patch);
     let after = current(st, &after_session);
-    if after.tiles().len() > MAX_TILES { return Err(extra("tooManyTiles", "viewer.layout.refusal.toomany", "Too many tiles open")) }
+    if after.tiles().len() > MAX_TILES { return Err(Refused::of_for(Refusal::TooManyTiles, locale)) }
     // only this device's own `@view*:<thread>` drafts come back; whatever else a patch carries is not stored
     let mut drafts = serde_json::Map::new();
     for (k, v) in after_session["drafts"].as_object().into_iter().flatten() { if owned_key(k, thread) && v.as_str().map_or(true, |t| !t.is_empty()) { drafts.insert(k.clone(), v.clone()); } }
@@ -393,18 +397,67 @@ pub async fn call(hub: &Arc<Hub>, c: &mut crate::hub::Conn, m: &str, p: &Value) 
         "viewer.layout" => read(st, store, &device, &th, bounds, s(p, "page"), p["diff"] == true),
         _ => act(st, store, &device, &th, s(p, "op"), p, &root, &locale, bounds),
     });
-    let r = match r { Some(r) => r, None => return Err(json!({"code": "starting", "key": "", "message": "The hub is starting."})) };
+    let r = match r { Some(r) => r, None => { let r = extra("starting", "viewer.layout.refusal.starting"); return Err(Refused { text: layout::catalog_text(r.key, &locale).unwrap_or(r.text), ..r }.to_value()) } };
     match r {
         Ok(v) => {
             store.watch(&device, &th, c.client);
+            let mut v = v;
             if m == "viewer.layout.act" && v["changed"] == true {
                 for (client, frame) in pushes(store, &device, &th, v["rev"].as_u64().unwrap_or(0)) { hub.push(client, frame); }
+                // a connection holding the layout's watch set has the new one installed with the answer
+                if store.holds(c.client) { if let Ok(w) = install(hub, c, store, &device, &th, bounds, false, &locale).await { v["watch"] = w; } }
             }
             Ok(v)
         }
-        Err(r) => Err(r.to_value()),
+        Err(r) => Err(Refused { text: layout::catalog_text(r.key, &locale).unwrap_or(r.text), ..r }.to_value()),
     }
 }
+
+/// The plot sources of the tiles of `device`'s layout of `thread` that are visible at `bounds`, as `kicad.watch.set` takes them (the hub builds the paths: they
+/// are never sent to the device). A tile of a version, which the hub cannot yet watch for a device, has none. Empty: the device has no layout of several tiles.
+fn watch_set_sources(st: &crate::state::State, store: &Store, device: &str, thread: &str, bounds: (f32, f32), root: &str, force: bool) -> Result<Vec<Value>, Refused> {
+    check_thread(st, thread)?;
+    let entry = store.entry(device, thread);
+    if !entry.as_ref().is_some_and(|e| has_layout(&e.drafts, thread)) { return Ok(vec![]) }
+    let l = current(st, &session_for(thread, entry.as_ref(), "", false));
+    let fitted = layout_fit::fit(&l, entry.as_ref().map(|e| e.recent.as_slice()).unwrap_or(&[]), bounds);
+    let visible: BTreeSet<&str> = fitted.visible.iter().map(|(i, _)| i.as_str()).collect();
+    Ok(viewer::watch_sources(&l, root, false, force).into_iter().filter(|e| e["tile"].as_str().is_some_and(|t| visible.contains(t))).collect())
+}
+
+/// Install `device`'s visible plot tiles as this connection's watch set: `{tiles: {tileId: [keys]}, keys: [...]}`.
+async fn install(hub: &Arc<Hub>, c: &mut crate::hub::Conn, store: &Store, device: &str, th: &str, bounds: (f32, f32), force: bool, locale: &str) -> Result<Value, Value> {
+    let root = crate::files::kicad::canonical::design_root(&super::ext::root_of(hub, th).await.unwrap_or_default());
+    let sources = match crate::statehost::with_state_of(hub, |st| watch_set_sources(st, store, device, th, bounds, &root, force)) {
+        Some(r) => r.map_err(|r| localized(r, locale))?,
+        None => return Err(localized(extra("starting", "viewer.layout.refusal.starting"), locale)),
+    };
+    if sources.is_empty() { store.hold(c.client, false); return Ok(json!({"thread": th, "tiles": {}, "keys": []})) }
+    let r = match super::rpc(hub, c, "kicad.watch.set", json!({"root": root, "sources": sources})).await {
+        Ok(r) => r,
+        Err(e) if e.as_str().is_some_and(|t| t.contains("too many")) => return Err(localized(Refused::of(Refusal::TooManySources), locale)),
+        Err(e) => return Err(e),
+    };
+    store.hold(c.client, true);
+    let tiles = r["result"]["tiles"].clone();
+    let mut keys: Vec<Value> = vec![];
+    for ks in tiles.as_object().into_iter().flat_map(|m| m.values()) { for k in ks.as_array().into_iter().flatten() { if !keys.contains(k) { keys.push(k.clone()) } } }
+    Ok(json!({"thread": th, "tiles": tiles, "keys": keys}))
+}
+
+fn localized(r: Refused, locale: &str) -> Value { Refused { text: layout::catalog_text(r.key, locale).unwrap_or(r.text), ..r }.to_value() }
+
+/// `viewer.watch {thread, kind: "layout", bounds, force?}`: the plot sources of the device's visible tiles watched at once; the answer names each tile's keys.
+/// Another `viewer.watch` on this connection (see `ext.rs`) lets the set go.
+pub async fn watch(hub: &Arc<Hub>, c: &mut crate::hub::Conn, p: &Value) -> Result<Value, Value> {
+    let store = global(&hub.cfg.home);
+    let device = store.device_of(c.client).unwrap_or_else(|| "hub".to_string());
+    let locale = hub.setting("ui.lang").await.unwrap_or_default();
+    let th = s(p, "thread");
+    let bounds = parse_bounds(p.get("bounds").unwrap_or(&Value::Null)).map_err(|r| r.to_value())?;
+    install(hub, c, store, &device, th, bounds, p["force"] == true, &locale).await
+}
+
 
 #[cfg(test)]
 #[path = "layout_tests.rs"]

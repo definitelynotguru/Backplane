@@ -503,7 +503,11 @@ async fn viewers(hub: &Arc<Hub>, c: &mut Conn, m: &str, p: &Value, is_browser: b
                 let list = crate::files::kicad::boards::pick(&crate::files::kicad::boards::find(std::path::Path::new(&root)), &bd);
                 let has_gerbers = crate::files::kicad::gerber::has_gerbers(std::path::Path::new(&root));
                 Ok(json!({"root":root,"pro":f.pro,"pcb":f.pcb,"sch":f.sch,"boards":machines::board_rows(&root, &list, &bd),"hasGerbers":has_gerbers})) }
+            "viewer.watch" if s(p, "kind") == "layout" => super::layout::watch(hub, c, p).await,
             "viewer.watch" => {
+                // a watch of one source lets this connection's layout set go (the hub's `kicad.watch.set` is released by `leave`)
+                let leaving = super::layout::global(&hub.cfg.home).holds(c.client);
+                if leaving { super::layout::global(&hub.cfg.home).hold(c.client, false) }
                 // the design's folder, as viewer.files answers it: a hardware thread working in a code worktree has no board there
                 let raw_kind = s(p, "kind"); let raw_path = s(p, "path");
                 if raw_kind == "gerbers" && machines::is_far(th) { return Err(err("Gerbers of a project on another machine are not shown yet")) }
@@ -522,6 +526,7 @@ async fn viewers(hub: &Arc<Hub>, c: &mut Conn, m: &str, p: &Value, is_browser: b
                 if !s(p, "tree").is_empty() { q["tree"] = p["tree"].clone() }
                 if !s(p, "kept").is_empty() { q["kept"] = p["kept"].clone() }
                 if p["force"] == true { q["force"] = json!(true) }
+                if leaving { q["leave"] = json!(true) }
                 // Split of a board picked in the viewer (`viewer.files` → `boards`, a row's `pcb`): its file and the schematic beside it are the panes' sources
                 let board = s(p, "board"); if kind == "split" && !board.is_empty() { if !board.starts_with(&format!("{root}/")) || board.split('/').any(|x| x == "..") || board.contains('\0') { return Err(err("that board is not in this project")) } q["board"] = json!(board); }
                 q["fresh"] = json!(true); // a phone holds only what `kept` names after a switch: models and parts come again (kicad/watch.rs `forget`) // the model the phone has cached (plot::mesh_id, hex): not sent again

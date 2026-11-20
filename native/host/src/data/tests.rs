@@ -1205,7 +1205,20 @@ async fn viewer_layout_over_a_socket_is_per_device_pushed_and_refuses_in_code_ke
     std::fs::create_dir_all(dir.join("mfg/rev1")).unwrap();
     std::fs::write(dir.join("mfg/rev1/unit-F_Cu.gbr"), "%FSLAX46Y46*%M02*").unwrap();
     let more = format!("{}\n{}\n", json!({"$":"ProjectCreated","id":"pl","title":"L","root":root,"at":1700000050}), json!({"$":"ThreadCreated","id":"tl","project":"pl","title":"Layout","env":"local","branch":"","worktree":"","provider":"claude","model":"","at":1700000051}));
+    // the hub's watch set is a stand-in here (kicad/watch.rs has its own tests): it answers every source tile with one key and remembers the request
+    struct SetSpy(Arc<Mutex<Vec<Value>>>);
+    impl RpcHandler for SetSpy {
+        fn methods(&self) -> &'static [&'static str] { &["kicad.watch.set", "kicad.watch"] }
+        fn call<'a>(&'a self, _h: &'a Arc<Hub>, _w: &'a Caller, id: &'a Value, m: &'a str, p: &'a Value) -> Fut<'a, Vec<Value>> {
+            self.0.lock().unwrap().push(json!({"m": m, "p": p}));
+            let mut tiles = serde_json::Map::new();
+            for src in p["sources"].as_array().into_iter().flatten() { tiles.insert(s(src, "tile").to_string(), json!([format!("0|{}|{}", s(p, "root"), s(src, "path"))])); }
+            Box::pin(async move { vec![json!({"t":"reply","id":id,"ok":true,"result":{"tiles":tiles,"keys":[]}})] })
+        }
+    }
     let (hub, port) = up_with("layout", &more).await;
+    let spy = Arc::new(Mutex::new(Vec::new()));
+    hub.register_rpc(Arc::new(SetSpy(spy.clone())));
     let _policies = crate::statehost::start(hub.hub.clone());
     for _ in 0..60 { if crate::statehost::booted(&hub.hub) && crate::statehost::with_state_of(&hub.hub, |st| st.threads.contains_key("tl")).unwrap_or(false) { break } tokio::time::sleep(Duration::from_millis(50)).await }
     let mut a = open(port, "&enc=json").await;
@@ -1236,4 +1249,21 @@ async fn viewer_layout_over_a_socket_is_per_device_pushed_and_refuses_in_code_ke
     assert_eq!(ask(&mut a, 6, "viewer.layout", json!({"thread":"L~t1","bounds":[390,844]})).await["error"]["code"], "linked");
     // an older phone that never asks is not affected: viewer.rail answers as it did
     assert_eq!(ask(&mut a, 7, "viewer.rail", json!({"thread":"tl","page":"board"})).await["ok"], true);
+    // the layout's watch set: every visible plot tile at once, each tile's keys named, no folder in the answer; a phone-sized fit watches only the tile it shows
+    let w = ask(&mut b, 3, "viewer.watch", json!({"thread":"tl","kind":"layout","bounds":[1400,900]})).await;
+    assert_eq!(w["ok"], true, "{w}");
+    assert_eq!(w["result"]["tiles"].as_object().unwrap().len(), 2, "{w}");
+    assert!(!w["result"]["keys"].as_array().unwrap().is_empty());
+    // the plot keys are the one place a folder appears (option A: today's plot keys, as the frames carry them); every other field is folder-free
+    let mut other = w["result"].clone(); other.as_object_mut().unwrap().remove("tiles"); other.as_object_mut().unwrap().remove("keys");
+    assert!(other.to_string().find(&root).is_none(), "no project folder in a watch reply outside its keys: {w}");
+    let w = ask(&mut a, 8, "viewer.watch", json!({"thread":"tl","kind":"layout","bounds":[390,844]})).await;
+    assert_eq!(w["result"]["tiles"].as_object().unwrap().len(), 1, "{w}");
+    // a plain watch lets the set go: it carries `leave`; with no set held it does not
+    assert_eq!(ask(&mut a, 10, "viewer.watch", json!({"thread":"tl","kind":"board"})).await["ok"], true);
+    assert_eq!(spy.lock().unwrap().last().unwrap()["p"]["leave"], true, "the set the connection held is let go by its next watch");
+    assert_eq!(ask(&mut a, 12, "viewer.watch", json!({"thread":"tl","kind":"board"})).await["ok"], true);
+    assert!(spy.lock().unwrap().last().unwrap()["p"].get("leave").is_none());
+    // a bad bounds on a watch is refused as on a read
+    assert_eq!(ask(&mut a, 11, "viewer.watch", json!({"thread":"tl","kind":"layout","bounds":[0]})).await["error"]["code"], "invalidInput");
 }
