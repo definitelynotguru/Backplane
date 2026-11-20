@@ -233,10 +233,29 @@ fn current(st: &crate::state::State, session: &Value) -> Layout {
     viewer::viewer_json(st, &json!({}), session).and_then(|v| serde_json::from_value::<Layout>(v["layout"].clone()).ok()).unwrap_or_else(Layout::empty)
 }
 
-/// What `viewer.layout` answers: the device's tree fitted to `bounds`.
+/// What `viewer.layout` answers: the device's tree fitted to `bounds`. The page the device is on (`page`, `diff`) is what a device with no layout of several
+/// tiles is looking at: it is that one tile, kept so a following op starts from what was read; a change of page moves the tree (a new `rev`).
 pub fn read(st: &crate::state::State, store: &Store, device: &str, thread: &str, bounds: (f32, f32), page: &str, diff: bool) -> Result<Value, Refused> {
     check_thread(st, thread)?;
     let entry = store.entry(device, thread);
+    let multi = entry.as_ref().is_some_and(|e| has_layout(&e.drafts, thread));
+    if !multi && !page.is_empty() {
+        // a single page: the tree is derived from it, and kept (in memory) so the next op starts here
+        let session = session_for(thread, None, page, diff);
+        let l = current(st, &session);
+        let mut e = entry.clone().unwrap_or(Entry { rev: 1, ..Default::default() });
+        let before = if entry.is_some() { current(st, &session_for(thread, entry.as_ref(), "", false)) } else { Layout::empty() };
+        let moved = entry.is_some() && serde_json::to_value(&before).ok() != serde_json::to_value(&l).ok();
+        e.drafts = session["drafts"].as_object().cloned().unwrap_or_default();
+        if moved { e.rev += 1; }
+        e.recent.retain(|x| l.contains_tile(x));
+        if let Some(f) = l.focus.clone() { e.recent.retain(|x| *x != f); e.recent.insert(0, f); }
+        let rev = e.rev;
+        let fitted = layout_fit::fit(&l, &e.recent, bounds);
+        let out = reply(thread, rev, &l, &fitted);
+        if entry.as_ref() != Some(&e) { store.put(device, thread, e); }
+        return Ok(out);
+    }
     let session = session_for(thread, entry.as_ref(), page, diff);
     let l = current(st, &session);
     let (rev, recent) = entry.map_or((1, vec![]), |e| (e.rev, e.recent));
