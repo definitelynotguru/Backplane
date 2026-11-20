@@ -83,10 +83,15 @@ fn branch(app: &Backplane, cx: &mut Context<Backplane>, viewer: &Value, node: &V
     let a = branch(app,cx,viewer,&node["a"],leaves,light,root);
     let b = branch(app,cx,viewer,&node["b"],leaves,light,root);
     let size = Rc::new(Cell::new([0.;2]));
-    let base = div().size_full().relative().flex().min_w_0().min_h_0().child(size_probe(size.clone()));
-    let base = if axis == 0 { base.flex_row() } else { base.flex_col() };
-    let first = div().flex_none().min_w_0().min_h_0().overflow_hidden();
-    let first = if axis == 0 { first.w(relative(ratio)).h_full().pr(px(4.)) } else { first.h(relative(ratio)).w_full().pb(px(4.)) };
+    let base = div().size_full().relative().min_w_0().min_h_0().child(size_probe(size.clone()));
+    let region = || div().absolute().min_w_0().min_h_0().overflow_hidden();
+    let (first, second) = if axis == 0 {
+        (region().left_0().top_0().bottom_0().w(relative(ratio)).pr(px(4.)),
+         region().right_0().top_0().bottom_0().w(relative(1. - ratio)).pl(px(4.)))
+    } else {
+        (region().top_0().left_0().right_0().h(relative(ratio)).pb(px(4.)),
+         region().bottom_0().left_0().right_0().h(relative(1. - ratio)).pt(px(4.)))
+    };
     let split = id.to_owned();
     let limits = viewer["splitLimits"][id].clone();
     let root = root.clone();
@@ -110,9 +115,10 @@ fn branch(app: &Backplane, cx: &mut Context<Backplane>, viewer: &Value, node: &V
                 cx.stop_propagation();
             }
         }));
-    // with_rect makes its element relative in test mode. Keep the hitbox absolutely positioned.
-    base.child(first.child(a)).child(div().flex_1().min_w_0().min_h_0().overflow_hidden().map(|d| if axis == 0 {d.pl(px(4.))} else {d.pt(px(4.))}).child(b))
-        .child(bar.child(with_rect(div().size_full(),||format!("splitter:{id}")))).into_any_element()
+    let bar = if crate::art::rects_on() {
+        bar.child(crate::art::probe_rect(format!("splitter:{id}")))
+    } else { bar };
+    base.child(first.child(a)).child(second.child(b)).child(bar).into_any_element()
 }
 
 #[cfg(test)]

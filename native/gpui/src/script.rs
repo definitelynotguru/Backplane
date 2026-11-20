@@ -1408,8 +1408,8 @@ mod tests {
     #[test] fn pointer_steps_keep_the_requested_button_and_modifier() {
         let path = crate::tmp::file("script", "pointer.json");
         std::fs::write(&path, r#"[{"pointer":"rail:Board"},{"pointer":"rail:Board","modifier":"shift"},{"pointer":"rail:Board","button":"middle"},{"pointer":"rail:Board","modifier":"unknown"}]"#).unwrap();
-        let steps = load(&path);
-        assert!(matches!(steps.as_slice(), [
+        let mut steps = load(&path);
+        assert!(matches!(steps.make_contiguous(), [
             Step::Pointer { shift: false, middle: false, .. },
             Step::Pointer { shift: true, middle: false, .. },
             Step::Pointer { shift: false, middle: true, .. },
