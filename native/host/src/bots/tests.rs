@@ -1767,9 +1767,7 @@ impl mail::owner::OwnerLink for Mesh3 {
             let o: Value = serde_json::from_str(&body).unwrap(); let (m, p) = (o["m"].as_str().unwrap().to_string(), o["p"].clone());
             self.sent.lock().unwrap().push((self.me, to, m.clone()));
             let b = &self.nodes.get().unwrap()[to]; let from = link.to_string();
-            let r = b.far_received(&from, &m, &p).await;
-            if m.starts_with("bots.room") { eprintln!("TRACE {:?} {}->{} {m} {} => {} {}", std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis() % 100000, self.me, to, p, r.0, r.1) }
-            Some(r)
+            Some(b.far_received(&from, &m, &p).await)
         })
     }
     fn machines(&self) -> Vec<(String, String, String)> { (0..3).filter(|j| *j != self.me).map(|j| (format!("L{}{}", j.min(self.me), j.max(self.me)), format!("m{j}"), format!("http://m{j}:3797"))).collect() }
@@ -1852,30 +1850,6 @@ async fn three(tag: &str) -> Three {
     until(&t.h[1], |l| l.iter().any(|e| e["$"] == "RoomPosted" && e["text"] == "second")).await;
     tokio::time::sleep(std::time::Duration::from_millis(300)).await;
     assert!(!posts(&t.h[0], &rid).iter().any(|p| p.1 == "second"), "A did not get it by way of B");
-}
-// TEMPORARY (removed before landing): the join scenario over and over, with a dump of each machine's room events when a wait is stuck
-fn room_events(hub: &Arc<Hub>) -> Vec<String> { log(hub).iter().filter(|e| matches!(e["$"].as_str(), Some("RoomSet" | "RoomDeleted" | "RoomPosted"))).map(|e| format!("{} {} {}", e["$"], e["members"].as_str().unwrap_or("").replace('\n', ","), e["text"].as_str().unwrap_or(""))).collect() }
-async fn until3(t: &Three, i: usize, what: &str, f: impl Fn(&[Value]) -> bool) {
-    for _ in 0..600 { if f(&log(&t.h[i])) { return } tokio::time::sleep(std::time::Duration::from_millis(50)).await }
-    panic!("STUCK on machine {i}: {what}\nA: {:#?}\nB: {:#?}\nC: {:#?}", room_events(&t.h[0]), room_events(&t.h[1]), room_events(&t.h[2]))
-}
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)] async fn tmp_join_repeated() {
-    for k in 0..12 {
-        eprintln!("ROUND {k}");
-        let t = three(&format!("jrep{k}")).await;
-        assert!(t.b[1].tool_call(&t.th[1], "room_create", &json!({"name":"b-room","members":"ada@m0","keep":true})).await.0);
-        let rid = log(&t.h[1]).iter().find(|e| e["$"] == "RoomSet").unwrap()["id"].as_str().unwrap().to_string();
-        until3(&t, 0, "A has the room", |l| l.iter().any(|e| e["$"] == "RoomSet" && e["id"] == rid.as_str())).await;
-        let (ok, r) = t.b[2].tool_call(&t.th[2], "room_join", &json!({"room":"b-room","machine":"m1"})).await; assert!(ok, "{r}");
-        until3(&t, 2, "C has the room", |l| l.iter().any(|e| e["$"] == "RoomSet" && e["id"] == rid.as_str())).await;
-        until3(&t, 0, "A has cy", |l| room_members_in(l, &rid).map_or(false, |m| m.contains("cy@"))).await;
-        assert!(t.b[2].tool_call(&t.th[2], "room_post", &json!({"room":"b-room","text":"direct"})).await.0);
-        until3(&t, 0, "A has direct", |l| l.iter().any(|e| e["$"] == "RoomPosted" && e["text"] == "direct")).await;
-        until3(&t, 1, "B has direct", |l| l.iter().any(|e| e["$"] == "RoomPosted" && e["text"] == "direct")).await;
-        t.down.lock().unwrap().push((2, 0));
-        assert!(t.b[2].tool_call(&t.th[2], "room_post", &json!({"room":"b-room","text":"second"})).await.0);
-        until3(&t, 1, "B has second", |l| l.iter().any(|e| e["$"] == "RoomPosted" && e["text"] == "second")).await;
-    }
 }
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)] async fn the_mesh_lists_machines_a_linked_machine_knows_that_this_one_does_not() {
     // A is linked to B only; B is linked to A and C: A sees C through B
