@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "totalAssetGzipBytes": 59410,
+  "totalAssetGzipBytes": 59498,
   "styleTokensSha256": "a4fed1b1c7bc676acc328907343eb5dcf87e426383d05617c632e48c0c3f2b80",
   "i18nKeys": [
     "agy.signout",
@@ -65,8 +65,8 @@
   ],
   "i18nSubsetSha256": "eb58bc2da7e9451bb09ab1e9c2503773de6771493f3545b4fcfe243f8a96b0ee",
   "inputs": {
-    "web/src/app.ts": "68f399ff71a61d4d3ebd920af70680888de7b202f308172e7efd780775b31162",
-    "web/src/chat.ts": "3a0a0e89e37d3dcba3cdd53b63939499c1c90614f5bbe6400e6bff4c93337a2a",
+    "web/src/app.ts": "eed53c6ccbafe197e32ac4f76e53bbd88ef100a8a20c634903d326a9a740a053",
+    "web/src/chat.ts": "a776b552265cd30b5eb17b6f104bcad19296b582be14e05e97309e15b8dbd5aa",
     "web/src/composer.ts": "0f379a870fd7b951e92ab0af01254a253174537f928d00459d52f0afc8729661",
     "web/src/i18n.ts": "40bb973e3acda75aea4bc5d16746757e59487b95225f5ed36cdfe13c813cf66d",
     "web/src/index.html": "a661afef2f425bd880bccd134f90969b4d037cf455da827c921a99764ffd83a4",
@@ -95,9 +95,9 @@
   },
   "outputs": {
     "assets/app.js": {
-      "bytes": 144469,
-      "gzipBytes": 42322,
-      "sha256": "47540526547a523b155261114d119bb40e2501ac96522dfe955f6b37c6ea171b"
+      "bytes": 144672,
+      "gzipBytes": 42410,
+      "sha256": "d81a5caaea445c037b90c258ff9d8cb07c305ab17a092c43eede74c18c9ef533"
     },
     "assets/favicon-light.svg": {
       "bytes": 1207,
