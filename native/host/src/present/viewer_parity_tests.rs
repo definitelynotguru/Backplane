@@ -16,7 +16,16 @@ const SNAPSHOT_REL: &str = "src/present/testdata/viewer_legacy_parity_main.json"
 fn normalize(v: &Value, root: &str) -> Value {
     match v {
         Value::String(s) => {
-            let s = s.replace(root, "<ROOT>");
+            // the root as it appears in the text: as it is, and JSON-escaped inside a command's JSON text (a Windows root has backslashes)
+            let esc = { let q = serde_json::to_string(root).unwrap(); q[1..q.len() - 1].to_string() };
+            let mut s = s.replace(&esc, "<ROOT>").replace(root, "<ROOT>");
+            if cfg!(windows) {
+                // the platform's own separators and its verbatim-path prefix are the platform's, not a difference of the viewer: one shape, `/`
+                // (a command's JSON text holds a backslash as two characters)
+                let json_text = s.starts_with('{');
+                if !json_text { s = s.replace("\\\\?\\", ""); } // (`\\?\`: the verbatim prefix a listed path may carry)
+                s = if json_text { s.replace("\\\\", "/") } else { s.replace('\\', "/") };
+            }
             // history sources carry the repo top's byte length before it (`rv::hist_git`): it varies with the temp folder's name
             let mut parts: Vec<String> = s.split('\t').map(str::to_string).collect();
             for i in 0..parts.len().saturating_sub(1) {

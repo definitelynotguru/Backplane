@@ -1461,6 +1461,11 @@ pub struct ShowDefaults { pub root: String, pub pcb: String, pub sch: String, pu
 #[derive(Clone, Debug, PartialEq)]
 pub struct ShowWant { pub kind: String, pub source: String }
 fn trim_end(p: &str) -> String { p.trim_end_matches('/').to_string() }
+/// A path in one shape for comparing: `/` for `\`, no trailing `/`.
+fn norm_path(p: &str) -> String { p.replace('\\', "/").trim_end_matches('/').to_string() }
+/// Two paths name the same file as the hub compares them: the same text in one separator shape, and on Windows without regard to case (the project's own file
+/// comes from the platform's `Path::join`, a path an agent names or the viewer draws may come with `/`).
+fn path_eq(a: &str, b: &str) -> bool { let (a, b) = (norm_path(a), norm_path(b)); if cfg!(windows) { a.eq_ignore_ascii_case(&b) } else { a == b } }
 /// The percent-decoded `path=` of a preview's `/img?path=` url.
 fn url_path(url: &str) -> String {
     let q = url.split_once("path=").map_or("", |x| x.1).split('&').next().unwrap_or("");
@@ -1517,7 +1522,7 @@ pub fn show_settled_with(want: &ShowWant, report: &Value, d: &ShowDefaults, reso
     match want.kind.as_str() {
         "board" | "3d" | "schematic" | "gerbers" => {
             if want.source.is_empty() { return false }
-            resolve_path(key_path(), &want.kind).is_some_and(|have| !have.is_empty() && have == want.source)
+            resolve_path(key_path(), &want.kind).is_some_and(|have| !have.is_empty() && path_eq(&have, &want.source))
         }
         // Split settles on the board its panes draw: the pane keyed `0|`, not the Split's own key
         "split" => {
@@ -1528,15 +1533,15 @@ pub fn show_settled_with(want: &ShowWant, report: &Value, d: &ShowDefaults, reso
                 let rel = rel_in(&d.root, &want.source);
                 let (board, sch) = resolved.cloned().unwrap_or_else(|| (rel.clone(), if rel.is_empty() { String::new() } else { schematic_for_board(&rel) }));
                 let board = if board.is_empty() { rel } else { board };
-                let has = |kind: &str, src: &str| tiles.iter().filter_map(Value::as_str).any(|t| t.split_once('\t').is_some_and(|(k, s)| k == kind && (src.is_empty() || s == src)));
+                let has = |kind: &str, src: &str| tiles.iter().filter_map(Value::as_str).any(|t| t.split_once('\t').is_some_and(|(k, s)| k == kind && (src.is_empty() || path_eq(s, src))));
                 return has("board", &board) && has("schematic", &sch);
             }
             let pane = report["panes"].as_array().and_then(|ps| ps.iter().filter_map(Value::as_str).find(|k| k.starts_with("0|")));
-            resolve_path(pane.and_then(path_of), "board").is_some_and(|have| !have.is_empty() && have == want.source)
+            resolve_path(pane.and_then(path_of), "board").is_some_and(|have| !have.is_empty() && path_eq(&have, &want.source))
         }
         "mech" => report["part"].as_str().is_some_and(|p| !p.is_empty() && p == want.source),
-        "files" => want.source.is_empty() || report["dir"].as_str().is_some_and(|d| trim_end(d) == want.source),
-        "file" => report["file"].as_str().filter(|u| !u.is_empty()).is_some_and(|u| trim_end(&url_path(u)) == want.source),
+        "files" => want.source.is_empty() || report["dir"].as_str().is_some_and(|d| path_eq(d, &want.source)),
+        "file" => report["file"].as_str().filter(|u| !u.is_empty()).is_some_and(|u| path_eq(&url_path(u), &want.source)),
         _ => true,
     }
 }
