@@ -38,7 +38,9 @@ Every assertion in Task 4 and Rule B7 reads ONLY from the metrics below and clea
 | incompatible overlay | `@tile[kind=files].overlay-gerbers` | control offered by the UI | Exercised only through a control the product really draws. If the UI never offers an overlay on a Files tile, the press is not delivered and `incompatible_overlay_refusal` is `unavailable` BY DESIGN (never a pass); to measure it the renderer must either offer that control and let the hub refuse, or the driver is changed to another pair the UI offers and the hub refuses. |
 | `viewer.layout` before/after the refusal | `viewer_state_json` forwards the hub's `viewer.layout` untouched into the `viewer` block of `settled`/`shot-ready` metrics | tree | Starting tree must be exactly Board + Files; layouts before and after must be equal; two empty dicts are not "equal". |
 
-Task 4 route: `rail:Gerbers` -> `@tile[kind=gerbers].add-beside` -> `add-beside:board` (the exact ordered ids, each delivered) -> (one step back) `@tile[kind=board].close`.
+Task 4 route (budget two): `rail:Gerbers` -> `{"pointer":"rail:Board","modifier":"shift"}` (or `"button":"middle"`): a physical Shift+left-click / middle-click on the rail's Board row,
+through real hit-testing (the pointer metric carries `id`, `modifier` none|shift, `button` left|middle, `hit_rect`, `dispatched`, `x`, `y`, `error`) -> (one step back) `@tile[kind=board].close`.
+A separate measured menu route (three presses): `rail:Gerbers` -> `@tile[kind=gerbers].add-beside` -> `add-beside:board`, with its own shots `task4-menu-*`.
 Freshness: each shot's tile inventory must carry a `tiles` event whose seq is after the last DELIVERED input (press or drag) of its transition.
 
 Every check stays `unavailable` until a build emits `GPUI_METRIC {"event":"tiles", ...}` and
@@ -377,32 +379,65 @@ def _add_beside(kind_sel: str, kind: str, side: str | None = None) -> list[dict]
     return [{"press": f"@tile[{kind_sel}].add-beside"}, {"wait": 120}, {"press": entry}, {"wait": 300}]
 
 
-def _exact_chain(presses: dict[str, list[dict]], mark: str, expected: list[str]) -> list[dict]:
-    """The presses of one mark, only when their ids are EXACTLY `expected`, in order, each delivered (executed)."""
+def _exact_chain(presses: dict[str, list[dict]], mark: str, expected: list) -> list[dict]:
+    """The presses of one mark, only when they are EXACTLY `expected`, in order, each delivered (executed).
+
+    An expected item is a control id, or `{"id", "modifier", "button"}` for a physical pointer (the client's `pointer` metric carries both: modifier
+    `none|shift`, button `left|middle`): a pointer without the expected modifier and button is not that route's press."""
     evs = presses.get(mark) or []
-    ok = [e.get("id") for e in evs] == expected and all(e.get("found") is True for e in evs)
-    return evs if ok else []
+    if len(evs) != len(expected) or not all(e.get("found") is True for e in evs):
+        return []
+    for ev, want in zip(evs, expected):
+        if isinstance(want, str):
+            if ev.get("id") != want or ev.get("pointer"):
+                return []
+        elif ev.get("id") != want["id"] or ev.get("pointer") is not True or ev.get("modifier") != want["modifier"] or ev.get("button") != want["button"]:
+            return []
+    return evs
 
 
-def build_task4_dock_steps(settle_timeout_ms: int = 15000) -> list[dict]:
-    """User-facing Task 4: Gerbers -> Add beside... -> Board in the UI, then close the added tile (one step back).
+def _route_chain(route: str, gid: str) -> list:
+    """The ordered presses that open Board beside Gerbers after `rail:Gerbers`, for each route Task 4 can take."""
+    if route == "shift":
+        return [{"id": "rail:Board", "modifier": "shift", "button": "left"}]
+    if route == "middle":
+        return [{"id": "rail:Board", "modifier": "none", "button": "middle"}]
+    if route == "menu":
+        return [f"tile:{gid}:add-beside", "add-beside:board"]
+    raise ValueError(f"unknown Task 4 route {route!r}")
 
-    No direct hub `layout-*` action; tile ids are selectors resolved by the client from the drawn inventory
-    (`@tile[kind=gerbers].add-beside` -> `tile:<real id>:add-beside`). Resets to idle first so `rail:Gerbers` never toggles Gerbers off.
+
+TASK4_PREFIX = {"shift": "task4-dock", "middle": "task4-dock", "menu": "task4-menu"}
+
+
+def build_task4_dock_steps(settle_timeout_ms: int = 15000, route: str = "shift") -> list[dict]:
+    """User-facing Task 4: Gerbers, then Board beside it, then close the added tile (one step back).
+
+    `shift` / `middle` (the budget-two route, scored as Task 4): `rail:Gerbers`, then ONE physical pointer on the rail's `rail:Board` row, Shift+left-click or
+    middle-click, through the window's own hit-testing (no alias, no hub action). `menu` (a separate measured route, three presses): `rail:Gerbers`, the
+    Gerbers tile's `add-beside` control (`tile:<real id>:add-beside`, a selector the client resolves from the drawn inventory), then `add-beside:board`.
+    The routes use their own marks and shots (`task4-dock-*`, `task4-menu-*`). Each resets to idle first so `rail:Gerbers` never toggles Gerbers off.
     """
+    pre = TASK4_PREFIX[route]
     tmo = min(settle_timeout_ms, 8000)
+    if route == "shift":
+        open_board = [{"pointer": "rail:Board", "modifier": "shift"}, {"wait": 300}]
+    elif route == "middle":
+        open_board = [{"pointer": "rail:Board", "button": "middle"}, {"wait": 300}]
+    else:
+        open_board = _add_beside("kind=gerbers", "board")
     return [
-        *_reset_idle("task4-dock-start-idle", tmo),
-        {"mark": "press:task4-dock-gerbers"},
+        *_reset_idle(f"{pre}-start-idle", tmo),
+        {"mark": f"press:{pre}-gerbers"},
         {"press": "rail:Gerbers"},
-        {"shot": "task4-dock-gerbers", "settle": "gerbers", "timeout_ms": tmo},
-        {"mark": "press:task4-dock-split"},
-        *_add_beside("kind=gerbers", "board"),
-        {"shot": "task4-dock-split", "settle": "board", "timeout_ms": tmo},
-        {"mark": "press:task4-dock-back"},
+        {"shot": f"{pre}-gerbers", "settle": "gerbers", "timeout_ms": tmo},
+        {"mark": f"press:{pre}-split"},
+        *open_board,
+        {"shot": f"{pre}-split", "settle": "board", "timeout_ms": tmo},
+        {"mark": f"press:{pre}-back"},
         {"press": "@tile[kind=board].close"},
         {"wait": 300},
-        {"shot": "task4-dock-back", "settle": "gerbers", "timeout_ms": tmo},
+        {"shot": f"{pre}-back", "settle": "gerbers", "timeout_ms": tmo},
     ]
 
 
@@ -483,8 +518,14 @@ def evaluate_task4_dock(
     caps_full: dict[str, dict],
     full_client_ok: bool,
     cleared_shots: set[str] | None = None,
+    route: str = "menu",
+    prefix: str = "task4-dock",
 ) -> dict | None:
-    """Evaluate Task 4 via the docking tile inventory (`Gerbers -> Add beside -> Board`, + one step back).
+    """Evaluate Task 4 via the docking tile inventory (Gerbers, then Board beside it, + one step back).
+
+    `route` is how Board is opened beside Gerbers: `shift` (Shift+left-click on the rail's Board row) or `middle` (middle-click on it), each the
+    budget-two route (`rail:Gerbers`, then one physical pointer on `rail:Board`); `menu` is `Gerbers -> Add beside... -> Board` (three presses,
+    a separate measured route). `prefix` names the route's marks and shots (`<prefix>-gerbers|split|back`, mark `press:<prefix>-...`).
 
     Returns `None` when the build does not emit `GPUI_METRIC event=tiles` or did not capture
     `task4-dock-split`, so callers stay `unavailable` / legacy until a build draws tiles.
@@ -492,7 +533,7 @@ def evaluate_task4_dock(
     if not parsed_full.get("tiles_metric_seen"):
         return None
     shots = parsed_full.get("shots") or {}
-    if "task4-dock-split" not in shots:
+    if f"{prefix}-split" not in shots:
         return None
 
     mark_seqs = parsed_full.get("mark_seqs") or {}
@@ -500,19 +541,19 @@ def evaluate_task4_dock(
 
     # The inventory predates the Add beside control. A single painted Gerbers
     # tile and a measured missing control establish that this route is unavailable.
-    start = shots.get("task4-dock-gerbers", {})
+    start = shots.get(f"{prefix}-gerbers", {})
     tiles = start.get("tiles") or []
-    if full_client_ok and start.get("settled") and start.get("controls_captured") and len(tiles) == 1 and tiles[0].get("kind") == "gerbers":
+    if route == "menu" and full_client_ok and start.get("settled") and start.get("controls_captured") and len(tiles) == 1 and tiles[0].get("kind") == "gerbers":
         control = f"tile:{tiles[0]['id']}:add-beside"
-        attempts = presses.get("press:task4-dock-split", [])
+        attempts = presses.get(f"press:{prefix}-split", [])
         if control not in start.get("controls_ids", []) and any(p.get("id") == control and p.get("found") is False for p in attempts):
             return {"outcome": "unavailable", "note": "Single Gerbers tile has no Add beside control",
                     "one_step_back": False, "found": False, "presses": [],
                     "evidence": {"tile": tiles[0]["id"], "missing_control": control}}
 
-    ok_g, err_g = _shot_cleared(full_dir, "task4-dock-gerbers", caps_full, shots, cleared_shots)
-    ok_s, err_s = _shot_cleared(full_dir, "task4-dock-split", caps_full, shots, cleared_shots)
-    ok_b, err_b = _shot_cleared(full_dir, "task4-dock-back", caps_full, shots, cleared_shots)
+    ok_g, err_g = _shot_cleared(full_dir, f"{prefix}-gerbers", caps_full, shots, cleared_shots)
+    ok_s, err_s = _shot_cleared(full_dir, f"{prefix}-split", caps_full, shots, cleared_shots)
+    ok_b, err_b = _shot_cleared(full_dir, f"{prefix}-back", caps_full, shots, cleared_shots)
 
     if not full_client_ok or not ok_g or not ok_s:
         return {
@@ -525,18 +566,18 @@ def evaluate_task4_dock(
         }
 
     # Require real observed delivery for the user-facing Task 4 route (never fabricated found=True).
-    p_g = [p for p in presses.get("press:task4-dock-gerbers", []) if p.get("found")]
-    p_s = [p for p in presses.get("press:task4-dock-split", []) if p.get("found")]
-    p_b = [p for p in presses.get("press:task4-dock-back", []) if p.get("found")]
+    p_g = [p for p in presses.get(f"press:{prefix}-gerbers", []) if p.get("found")]
+    p_s = [p for p in presses.get(f"press:{prefix}-split", []) if p.get("found")]
+    p_b = [p for p in presses.get(f"press:{prefix}-back", []) if p.get("found")]
     observed_presses = [p["id"] for p in p_g] + [p["id"] for p in p_s]
     found_route = bool(p_g and p_s)
 
-    s_g = shots["task4-dock-gerbers"]
-    s_split = shots["task4-dock-split"]
+    s_g = shots[f"{prefix}-gerbers"]
+    s_split = shots[f"{prefix}-split"]
 
     # Fresh tile inventory for every shot: after the last delivered press of the EXACT ordered route
     # (rail Gerbers by id, the drawn Gerbers tile's `add-beside`, then `add-beside:board`, then the drawn Board tile's `close`).
-    fg_ok, fg_err = _fresh_tiles_after_mark(s_g, mark_seqs, "press:task4-dock-gerbers", _exact_chain(presses, "press:task4-dock-gerbers", ["rail:Gerbers"]))
+    fg_ok, fg_err = _fresh_tiles_after_mark(s_g, mark_seqs, f"press:{prefix}-gerbers", _exact_chain(presses, f"press:{prefix}-gerbers", ["rail:Gerbers"]))
     if not fg_ok:
         return {
             "outcome": "unavailable",
@@ -559,8 +600,8 @@ def evaluate_task4_dock(
         }
     gid = str(g_tiles[0].get("id") or "")
     fs_ok, fs_err = _fresh_tiles_after_mark(
-        s_split, mark_seqs, "press:task4-dock-split",
-        _exact_chain(presses, "press:task4-dock-split", [f"tile:{gid}:add-beside", "add-beside:board"]),
+        s_split, mark_seqs, f"press:{prefix}-split",
+        _exact_chain(presses, f"press:{prefix}-split", _route_chain(route, gid)),
     )
     if not fs_ok:
         return {
@@ -634,7 +675,7 @@ def evaluate_task4_dock(
         elif sources[0] == sources[1]:
             fails.append(f"both tiles report identical source ({sources[0]!r})")
 
-    split_png = full_dir / "task4-dock-split.png"
+    split_png = full_dir / f"{prefix}-split.png"
     bodies = [tile_body_non_flat(split_png, t.get("body")) for t in tiles]
     if any(b is not True for b in bodies):
         fails.append(f"tile body flat or unreadable ({bodies})")
@@ -647,8 +688,8 @@ def evaluate_task4_dock(
     back_note = err_b
     back_unavailable = not ok_b  # an uncaptured/uncleared return shot is not a product failure
     if ok_b:
-        s_back = shots["task4-dock-back"]
-        fb_ok, fb_err = _fresh_tiles_after_mark(s_back, mark_seqs, "press:task4-dock-back", _exact_chain(presses, "press:task4-dock-back", [f"tile:{board_ids[0]}:close"] if board_ids else []))
+        s_back = shots[f"{prefix}-back"]
+        fb_ok, fb_err = _fresh_tiles_after_mark(s_back, mark_seqs, f"press:{prefix}-back", _exact_chain(presses, f"press:{prefix}-back", [f"tile:{board_ids[0]}:close"] if board_ids else []))
         if not fb_ok:
             back_note, back_unavailable = fb_err, True
         elif not p_b:
@@ -664,7 +705,7 @@ def evaluate_task4_dock(
             b_rect = _rect_tuple(b_tiles[0].get("rect")) if len(b_tiles) == 1 else None
             b_id = str(b_tiles[0].get("id") or "") if len(b_tiles) == 1 else ""
             b_src = _tile_source(b_tiles[0], v_back) if len(b_tiles) == 1 else ""
-            b_body = tile_body_non_flat(full_dir / "task4-dock-back.png", b_tiles[0].get("body")) if len(b_tiles) == 1 else None
+            b_body = tile_body_non_flat(full_dir / f"{prefix}-back.png", b_tiles[0].get("body")) if len(b_tiles) == 1 else None
             same_survivor = bool(init_id and b_id == init_id and init_src and b_src == init_src)
             width_restored = bool(b_rect and init_rect and b_rect[2] >= 0.95 * init_rect[2])
             if (
@@ -708,6 +749,17 @@ def evaluate_task4_dock(
             "one_step_back_note": back_note,
         },
     }
+
+
+def task4_menu_route_check(full_dir: Path, parsed_full: dict, caps_full: dict[str, dict], full_client_ok: bool, cleared_shots: set[str] | None = None) -> dict | None:
+    """The menu route to the same Task 4 result (`rail:Gerbers`, the Gerbers tile's `add-beside`, `add-beside:board`; three presses), measured on its own as the
+    extra check `full/task4-menu-route`. It is not the budget-two route and does not change Task 4's score. None: the run has no such route (no `task4-menu-split` shot)."""
+    r = evaluate_task4_dock(full_dir, parsed_full, caps_full, full_client_ok, cleared_shots=cleared_shots, route="menu", prefix="task4-menu")
+    if r is None:
+        return None
+    outcome = {"passed": "passed", "task_failed": "failed", "unavailable": "unavailable"}.get(r["outcome"], "failed")
+    return {"id": "full/task4-menu-route", "kind": "full", "name": "Gerbers, Add beside, Board: the menu route to Task 4's result (three presses, measured on its own)",
+            "outcome": outcome, "note": r["note"], "evidence": {**r["evidence"], "presses": r["presses"], "one_step_back": r["one_step_back"], "found": r["found"]}}
 
 
 def evaluate_b7_dock(

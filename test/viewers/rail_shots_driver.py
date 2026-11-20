@@ -414,7 +414,8 @@ def build_script(kind: str, early_ms: int = 300, settle_timeout_ms: int = 15000,
     if kind == "full":
         # Docking/tiling (Task 4 user route, Rule B7): scheduled in the normal `full` run, UI controls and drawn-inventory selectors only;
         # every check stays `unavailable` until a build emits `GPUI_METRIC event=tiles` (docs: rail_dock.py contract table).
-        steps.extend(DOCK.build_task4_dock_steps(settle_timeout_ms))
+        steps.extend(DOCK.build_task4_dock_steps(settle_timeout_ms))  # the budget-two route (Shift+click on rail:Board)
+        steps.extend(DOCK.build_task4_dock_steps(settle_timeout_ms, route="menu"))  # the menu route, measured separately
         steps.extend(DOCK.build_b7_steps(settle_timeout_ms))
 
     if kind == "full" and embed:

@@ -117,9 +117,14 @@ class RailDockHarnessTests(unittest.TestCase):
         self.assertIn("b7:overlay-incompatible", marks)
         t4_steps = [s for s in steps if isinstance(s, dict)]
         idx_mark = next(i for i, s in enumerate(t4_steps) if s.get("mark") == "press:task4-dock-split")
-        # Task 4 is the user route: Add beside on the drawn Gerbers tile, then the Board entry; no direct hub layout action anywhere
-        self.assertEqual(t4_steps[idx_mark + 1].get("press"), "@tile[kind=gerbers].add-beside")
-        self.assertEqual(t4_steps[idx_mark + 3].get("press"), "add-beside:board")
+        # Task 4 (budget two) is a physical Shift+click on the rail's Board row after rail:Gerbers; no alias, no direct hub layout action anywhere
+        self.assertEqual(t4_steps[idx_mark + 1], {"pointer": "rail:Board", "modifier": "shift"})
+        # the menu route is a separate measured route with its own marks: Add beside on the drawn Gerbers tile, then the Board entry
+        idx_menu = next(i for i, s in enumerate(t4_steps) if s.get("mark") == "press:task4-menu-split")
+        self.assertEqual(t4_steps[idx_menu + 1].get("press"), "@tile[kind=gerbers].add-beside")
+        self.assertEqual(t4_steps[idx_menu + 3].get("press"), "add-beside:board")
+        self.assertIn("press:task4-menu-gerbers", marks)
+        self.assertIn("press:task4-menu-back", marks)
         self.assertFalse([s for s in t4_steps if "action" in s and str(s["action"][0]).startswith("layout")])
         # No literal tile/splitter ids: every tile or splitter target is a selector resolved from the drawn inventory
         for s in t4_steps:
@@ -236,6 +241,103 @@ class RailDockHarnessTests(unittest.TestCase):
 
             # 5. Not in per-shot privacy clearance -> harness_failed (fail-closed)
             self.assertEqual(DOCK.evaluate_task4_dock(fdir, parsed, caps, True, cleared_shots={"task4-dock-gerbers"})["outcome"], "harness_failed")
+
+    def test_task4_budget_two_route_steps_and_exact_pointer_chain(self) -> None:
+        shift = DOCK.build_task4_dock_steps(route="shift")
+        middle = DOCK.build_task4_dock_steps(route="middle")
+        menu = DOCK.build_task4_dock_steps(route="menu")
+        at = lambda st, mark: next(i for i, x in enumerate(st) if x.get("mark") == mark)  # noqa: E731
+        self.assertEqual(shift[at(shift, "press:task4-dock-split") + 1], {"pointer": "rail:Board", "modifier": "shift"})
+        self.assertEqual(middle[at(middle, "press:task4-dock-split") + 1], {"pointer": "rail:Board", "button": "middle"})
+        # the scored route has two inputs between idle and the shot: rail:Gerbers and one pointer (never a press of rail:Board, never the menu)
+        for st, pre in ((shift, "task4-dock"), (middle, "task4-dock")):
+            body = st[at(st, f"press:{pre}-gerbers"):at(st, f"press:{pre}-back")]
+            inputs = [x for x in body if "press" in x or "pointer" in x]
+            self.assertEqual(len(inputs), 2, inputs)
+            self.assertEqual(inputs[0], {"press": "rail:Gerbers"})
+            self.assertFalse([x for x in body if "press" in x and "add-beside" in str(x["press"])])
+        self.assertEqual([x.get("press") for x in menu if x.get("press") and x["press"] != "@tile[kind=board].close"][:1], ["rail:Gerbers"])
+        self.assertNotIn({"pointer": "rail:Board", "modifier": "shift"}, menu)
+        # the exact chain accepts the pointer only with the expected modifier and button, delivered, and never as a plain press of the same id
+        ev = {"id": "rail:Board", "found": True, "pointer": True, "modifier": "shift", "button": "left"}
+        want = DOCK._route_chain("shift", "g")
+        self.assertEqual(DOCK._exact_chain({"m": [ev]}, "m", want), [ev])
+        for bad in (
+            {**ev, "modifier": "none"}, {**ev, "button": "middle"}, {**ev, "found": False}, {**ev, "pointer": False}, {**ev, "id": "rail:Gerbers"},
+        ):
+            self.assertEqual(DOCK._exact_chain({"m": [bad]}, "m", want), [], bad)
+        mid = {"id": "rail:Board", "found": True, "pointer": True, "modifier": "none", "button": "middle"}
+        self.assertEqual(DOCK._exact_chain({"m": [mid]}, "m", DOCK._route_chain("middle", "g")), [mid])
+        self.assertEqual(DOCK._exact_chain({"m": [mid]}, "m", want), [], "a middle-click is not the Shift route")
+        self.assertEqual(DOCK._exact_chain({"m": [ev, ev]}, "m", want), [], "an extra press is not the budget-two route")
+        self.assertEqual(DOCK._route_chain("menu", "g"), ["tile:g:add-beside", "add-beside:board"])
+        self.assertEqual(DOCK._exact_chain({"m": [{"id": "rail:Board", "found": True}]}, "m", ["rail:Board"]), [{"id": "rail:Board", "found": True}])
+        self.assertEqual(DOCK._exact_chain({"m": [ev]}, "m", ["rail:Board"]), [], "a pointer is not a control press")
+        with self.assertRaises(ValueError):
+            DOCK._route_chain("keyboard", "g")
+
+    def test_task4_modified_pointer_route_scores_and_the_menu_route_is_its_own_check(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            fdir = Path(td)
+            lay = {"topbar": {"x": 0, "y": 0, "w": 1440, "h": 36}, "main": {"x": 264, "y": 36, "w": 488, "h": 835}, "rail": {"x": 1369, "y": 36, "w": 71, "h": 835}}
+            r_full = {"x": 753, "y": 36, "w": 616, "h": 835}
+            r_left = {"x": 753, "y": 36, "w": 306, "h": 835}
+            r_right = {"x": 1063, "y": 36, "w": 306, "h": 835}
+            sp_x = {"id": "sp-1", "rect": {"x": 1059, "y": 36, "w": 4, "h": 835}, "axis": "x"}
+
+            def route(pre: str, split_presses: list[dict]) -> tuple[dict, dict]:
+                _write_painted_png(fdir / f"{pre}-gerbers.png", [(r_full, (60, 180, 120), True)])
+                _write_painted_png(fdir / f"{pre}-split.png", [(r_left, (60, 180, 120), True), (r_right, (200, 160, 60), True)])
+                _write_painted_png(fdir / f"{pre}-back.png", [(r_full, (60, 180, 120), True)])
+                shots = {
+                    f"{pre}-gerbers": {"state": "ready", "layout": lay, "tiles_seq": 15, "splitters": [], "viewer": {},
+                        "tiles": [{"id": "tile-g", "kind": "gerbers", "source": "mfg/gerbers", "rect": r_full, "body": _body_of(r_full), "frame": 1, "focused": True}]},
+                    f"{pre}-split": {"state": "ready", "layout": lay, "tiles_seq": 25, "splitters": [sp_x], "viewer": {}, "tiles": [
+                        {"id": "tile-g", "kind": "gerbers", "source": "mfg/gerbers", "rect": r_left, "body": _body_of(r_left), "frame": 2, "focused": False},
+                        {"id": "tile-b", "kind": "board", "source": "ecc83-pp.kicad_pcb", "rect": r_right, "body": _body_of(r_right), "frame": 1, "focused": True}]},
+                    f"{pre}-back": {"state": "ready", "layout": lay, "tiles_seq": 35, "splitters": [], "viewer": {},
+                        "tiles": [{"id": "tile-g", "kind": "gerbers", "source": "mfg/gerbers", "rect": r_full, "body": _body_of(r_full), "frame": 3, "focused": True}]},
+                }
+                parsed = {"tiles_metric_seen": True,
+                          "mark_seqs": {f"press:{pre}-gerbers": 10, f"press:{pre}-split": 20, f"press:{pre}-back": 30},
+                          "presses": {f"press:{pre}-gerbers": [{"id": "rail:Gerbers", "found": True, "seq": 11}],
+                                      f"press:{pre}-split": split_presses,
+                                      f"press:{pre}-back": [{"id": "tile:tile-b:close", "found": True, "seq": 31}]},
+                          "shots": shots}
+                return parsed, {k: _ok_cap() for k in shots}
+
+            shift_ev = [{"id": "rail:Board", "found": True, "pointer": True, "modifier": "shift", "button": "left", "seq": 21}]
+            parsed, caps = route("task4-dock", shift_ev)
+            res = DOCK.evaluate_task4_dock(fdir, parsed, caps, True, cleared_shots=set(caps), route="shift")
+            self.assertEqual(res["outcome"], "passed", res)
+            self.assertEqual(res["presses"], ["rail:Gerbers", "rail:Board"], "two presses: within the budget of two")
+            # the same inventory with the plain (unmodified) pointer is not the route: never a pass
+            plain = [{**shift_ev[0], "modifier": "none"}]
+            parsed_plain, _ = route("task4-dock", plain)
+            self.assertEqual(DOCK.evaluate_task4_dock(fdir, parsed_plain, caps, True, cleared_shots=set(caps), route="shift")["outcome"], "unavailable")
+            # the middle-click route is the alternate
+            mid = [{**shift_ev[0], "modifier": "none", "button": "middle"}]
+            parsed_mid, _ = route("task4-dock", mid)
+            self.assertEqual(DOCK.evaluate_task4_dock(fdir, parsed_mid, caps, True, cleared_shots=set(caps), route="middle")["outcome"], "passed")
+            # the menu route is measured on its own (three presses) and is an extra check, never the Task 4 score
+            menu_ev = [{"id": "tile:tile-g:add-beside", "found": True, "seq": 21}, {"id": "add-beside:board", "found": True, "seq": 22}]
+            parsed_menu, caps_menu = route("task4-menu", menu_ev)
+            chk = DOCK.task4_menu_route_check(fdir, parsed_menu, caps_menu, True, cleared_shots=set(caps_menu))
+            self.assertEqual((chk["id"], chk["outcome"]), ("full/task4-menu-route", "passed"), chk)
+            self.assertEqual(chk["evidence"]["presses"], ["rail:Gerbers", "tile:tile-g:add-beside", "add-beside:board"])
+            parsed_bad, caps_bad = route("task4-menu", [menu_ev[0]])
+            self.assertEqual(DOCK.task4_menu_route_check(fdir, parsed_bad, caps_bad, True, cleared_shots=set(caps_bad))["outcome"], "unavailable")
+            # a run without the menu route has no such check
+            self.assertIsNone(DOCK.task4_menu_route_check(fdir, parsed, caps, True, cleared_shots=set(caps)))
+
+    def test_pointer_metric_modifier_and_button_reach_the_press_records(self) -> None:
+        ev = {"event": "pointer", "id": "rail:Board", "modifier": "shift", "button": "left", "hit_rect": True, "dispatched": True, "x": 1.0, "y": 2.0, "error": None}
+        with tempfile.TemporaryDirectory() as td:
+            log = Path(td) / "client.log"
+            log.write_text("GPUI_METRIC " + json.dumps({"event": "mark", "name": "press:t"}) + "\nGPUI_METRIC " + json.dumps(ev) + "\n", encoding="utf-8")
+            parsed = P.parse_client_log(log)
+            p = parsed["presses"]["press:t"][0]
+        self.assertEqual((p["modifier"], p["button"], p["found"], p["pointer"]), ("shift", "left", True, True))
 
     def test_b7_all_seven_checks_and_missing_pane_geometry_and_stale_and_string_false(self) -> None:
         with tempfile.TemporaryDirectory() as td:
