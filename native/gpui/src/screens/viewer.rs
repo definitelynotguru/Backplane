@@ -160,15 +160,6 @@ pub fn is_tiled(viewer: &Value) -> bool {
     viewer["tiled"].as_bool().unwrap_or_else(|| viewer["splitLimits"].is_object())
 }
 
-#[cfg(test)]
-#[test]
-fn hub_distinguishes_a_dock_from_legacy_split() {
-    use serde_json::json;
-    assert!(is_tiled(&json!({"tiled":true})));
-    assert!(!is_tiled(&json!({"tiled":false,"splitLimits":{}})));
-    assert!(is_tiled(&json!({"splitLimits":{}})));
-    assert!(!is_tiled(&json!({"open":"split","layout":{"root":{"type":"split"}}})));
-}
 
 /// Whether the panel is open: a viewer page is on, or the thread has a diff.
 /// Whether the pane is up: a page the hub has open, or a rail press it has not answered yet (`pane_page`): the pane opens and shuts at the press.
@@ -1198,6 +1189,15 @@ pub fn follow(tx: &tokio::sync::mpsc::Sender<Command>, thread: &Value) {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn hub_distinguishes_a_dock_from_legacy_split() {
+        use super::is_tiled;
+        use serde_json::json;
+        assert!(is_tiled(&json!({"tiled":true})));
+        assert!(!is_tiled(&json!({"tiled":false,"splitLimits":{}})));
+        assert!(is_tiled(&json!({"splitLimits":{}})));
+        assert!(!is_tiled(&json!({"open":"split","layout":{"root":{"type":"split"}}})));
+    }
     /// An agent's show names every kind with its full path and a token; a hub that advertises tokens gets all three back unchanged in `view-show`, any
     /// other hub (an older one) gets plain `view` exactly as before.
     #[test] fn an_agents_show_round_trips_kind_path_and_token_or_falls_back_to_plain_view() {
