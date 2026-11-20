@@ -255,7 +255,7 @@ pub async fn call(hub: &Arc<Hub>, c: &mut Conn, m: &str, p: &Value, is_browser: 
             match r { Ok(_) => thread_now(hub, th).await.map(|t| json!({"thread":t})), Err(e) => Err(e) }
         }
         "mentions.list" => mentions(hub, p).await,
-        "viewer.files" | "viewer.watch" | "viewer.probe" | "viewer.info" | "viewer.layers" | "viewer.refs" | "viewer.compare" | "viewer.rail" | "viewer.follow" | "files.entries" | "mech.list" | "browser" => viewers(hub, c, m, p, is_browser).await?,
+        "viewer.files" | "viewer.watch" | "viewer.probe" | "viewer.info" | "viewer.layers" | "viewer.refs" | "viewer.compare" | "viewer.rail" | "viewer.follow" | "viewer.layout" | "viewer.layout.act" | "files.entries" | "mech.list" | "browser" => viewers(hub, c, m, p, is_browser).await?,
         "thread.again" => { let th = s(p, "thread"); if th.is_empty() { return Some(Err(err("thread"))) } rpc(hub, c, "thread.again", json!({"thread":th})).await.map(|_| json!({})) }
         "voice.start" | "voice.stop" | "voice.act" | "voice.view" | "voice.key" | "voice.page" | "voice.page.act" | "voice.always" => voice(hub, c, m, p).await,
         "machines.page" | "machines.page.act" | "devices.page" | "devices.page.act" | "notify.page" | "notify.page.act" | "ring.list" | "ring.get" | "ring.search" | "ring.hear" | "ring.send" | "ring.setup" | "ring.page" | "ring.page.act" | "mcp.page" | "mcp.page.act" | "browser.page" | "browser.page.act" => {
@@ -473,7 +473,7 @@ pub fn project_card(card: &Value) -> Value {
     json!({"goal": card["goal"].as_str().unwrap_or(""), "boards": boards})
 }
 // ---- viewers, files, browser (each the hub's own request, for the folder of the thread) ----
-async fn root_of(hub: &Arc<Hub>, thread: &str) -> Result<String, Value> {
+pub(super) async fn root_of(hub: &Arc<Hub>, thread: &str) -> Result<String, Value> {
     // a thread of a linked machine: the folder over there (its mirror holds the project's root and the thread's worktree)
     if let Some((_, root)) = machines::far_root(hub, thread) { return Ok(root) }
     crate::files::root_of(hub, thread).await.map(|p| p.to_string_lossy().into_owned()).ok_or_else(|| err("that thread has no folder"))
@@ -489,6 +489,8 @@ async fn viewers(hub: &Arc<Hub>, c: &mut Conn, m: &str, p: &Value, is_browser: b
     let th = s(p, "thread");
     Some(async {
         match m {
+            // the docking layout for this device (data/layout.rs, feature `layout`)
+            "viewer.layout" | "viewer.layout.act" => super::layout::call(hub, c, m, p).await,
             "viewer.files" if machines::is_far(th) => { let (_, root) = machines::far_root(hub, th).ok_or_else(|| err("that thread has no folder"))?;
                 let r = result(rpc(hub, c, "boards.list", json!({"thread":th})).await?); let mut v = machines::board_files(&root, s(&r, "board_default"));
                 let list: Vec<String> = r["board_list"].as_array().into_iter().flatten().filter_map(Value::as_str).map(str::to_string).collect();
@@ -608,7 +610,7 @@ pub(crate) fn browser_requests(th: &str, p: &Value) -> Result<Vec<Value>, String
 }
 /// Frames the hub pushes to this connection that a phone's viewer reads: a plot (binary CBOR, or JSON for "none") and a browser frame's announcement.
 pub fn wants_raw(b: &[u8]) -> bool { b.len() > 7 && (0xA0..=0xB7).contains(&b[0]) && b[1] == 1 && b[2..7] == [0x64, b'p', b'l', b'o', b't'] }
-pub fn wants_value(v: &Value) -> bool { matches!(s(v, "t"), "plot" | "shot" | "voice" | "star" | "migrating") || (s(v, "t") == "d" && s(v, "k") == "btw") }
+pub fn wants_value(v: &Value) -> bool { matches!(s(v, "t"), "plot" | "shot" | "voice" | "star" | "migrating" | "layout") || (s(v, "t") == "d" && s(v, "k") == "btw") }
 
 /// `composer.run {thread, text}`: the draft is one of `hello.commands`, run the way the desktop runs it (session/composer.rs). The answer's `kind` says what became of it: `btw` (a side
 /// question, its answer comes as a push `{t:"d",k:"btw",thread,q,a}` to this socket only), `give`, `secret` (the app opens its masked box for `name`; `secret.set` saves), `intent`, or

@@ -65,10 +65,10 @@ async fn ask(ws: &mut Ws, id: u64, m: &str, p: Value) -> Value {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)] async fn data_hello_capabilities_and_both_encodings() {
-    assert_eq!(crate::hub::capabilities()["data"]["proto"], "data/1"); assert_eq!(crate::hub::capabilities()["data"]["features"], json!(["images", "actions", "search", "models", "mentions", "bots", "notify", "viewers", "files", "browser", "diff", "review", "fold", "picker", "voice", "order", "layers", "onboard", "push", "settled", "commands", "work", "star", "accounts", "machines", "history", "terms", "links", "devices", "queue", "buy", "status", "subview", "find", "notifysettings", "ring", "hubOffer", "swarm", "sections", "telemetryNotice", "mcpsettings", "fabprofile", "plan", "mgmt", "replyImages", "cats", "projectcard", "termChat", "copy", "reviewmode", "rail", "gerbers", "follow", "unanswered", "browserstart"]));
+    assert_eq!(crate::hub::capabilities()["data"]["proto"], "data/1"); assert_eq!(crate::hub::capabilities()["data"]["features"], json!(["images", "actions", "search", "models", "mentions", "bots", "notify", "viewers", "files", "browser", "diff", "review", "fold", "picker", "voice", "order", "layers", "onboard", "push", "settled", "commands", "work", "star", "accounts", "machines", "history", "terms", "links", "devices", "queue", "buy", "status", "subview", "find", "notifysettings", "ring", "hubOffer", "swarm", "sections", "telemetryNotice", "mcpsettings", "fabprofile", "plan", "mgmt", "replyImages", "cats", "projectcard", "termChat", "copy", "reviewmode", "rail", "gerbers", "follow", "unanswered", "browserstart", "layout"]));
     let (_h, port) = up("hello").await;
     let mut ws = open(port, "&enc=json").await; let v = next(&mut ws).await;
-    assert_eq!((v["t"].as_str(), v["proto"].as_str()), (Some("hello"), Some("data/1"))); assert_eq!(v["hub"], format!("127.0.0.1:{port}"), "the hub as asked (the Host header)"); assert!(v["name"].is_string(), "the machine's name: {v}"); assert_eq!(v["features"], json!(["images", "actions", "search", "models", "mentions", "bots", "notify", "viewers", "files", "browser", "diff", "review", "fold", "picker", "voice", "order", "layers", "onboard", "push", "settled", "commands", "work", "star", "accounts", "machines", "history", "terms", "links", "devices", "queue", "buy", "status", "subview", "find", "notifysettings", "ring", "hubOffer", "swarm", "sections", "telemetryNotice", "mcpsettings", "fabprofile", "plan", "mgmt", "replyImages", "cats", "projectcard", "termChat", "copy", "reviewmode", "rail", "gerbers", "follow", "unanswered", "browserstart"]), "a hub from before images does not list it"); assert!(v["now"].as_u64().unwrap() > 1_600_000_000_000);
+    assert_eq!((v["t"].as_str(), v["proto"].as_str()), (Some("hello"), Some("data/1"))); assert_eq!(v["hub"], format!("127.0.0.1:{port}"), "the hub as asked (the Host header)"); assert!(v["name"].is_string(), "the machine's name: {v}"); assert_eq!(v["features"], json!(["images", "actions", "search", "models", "mentions", "bots", "notify", "viewers", "files", "browser", "diff", "review", "fold", "picker", "voice", "order", "layers", "onboard", "push", "settled", "commands", "work", "star", "accounts", "machines", "history", "terms", "links", "devices", "queue", "buy", "status", "subview", "find", "notifysettings", "ring", "hubOffer", "swarm", "sections", "telemetryNotice", "mcpsettings", "fabprofile", "plan", "mgmt", "replyImages", "cats", "projectcard", "termChat", "copy", "reviewmode", "rail", "gerbers", "follow", "unanswered", "browserstart", "layout"]), "a hub from before images does not list it"); assert!(v["now"].as_u64().unwrap() > 1_600_000_000_000);
     // the default is binary CBOR with plain string keys
     let mut c = open(port, "").await; let m = tokio::time::timeout(Duration::from_secs(5), c.next()).await.unwrap().unwrap().unwrap();
     let Message::Binary(b) = m else { panic!("binary") }; assert!(b.windows(5).any(|w| w == b"proto"), "plain keys, not the hub's dictionary");
@@ -1194,4 +1194,46 @@ async fn viewer_rail_omits_split_for_browser_only() {
     let _ = tokio::time::timeout(Duration::from_secs(1), srv).await;
     drop(hub);
     let _ = std::fs::remove_dir_all(&base);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn viewer_layout_over_a_socket_is_per_device_pushed_and_refuses_in_code_key_message() {
+    let dir = crate::plat::tmp::dir("data-layout-socket");
+    let root = dir.to_string_lossy().into_owned();
+    std::fs::write(dir.join("unit.kicad_pcb"), "(kicad_pcb)").unwrap();
+    std::fs::write(dir.join("unit.kicad_sch"), "(kicad_sch)").unwrap();
+    std::fs::create_dir_all(dir.join("mfg/rev1")).unwrap();
+    std::fs::write(dir.join("mfg/rev1/unit-F_Cu.gbr"), "%FSLAX46Y46*%M02*").unwrap();
+    let more = format!("{}\n{}\n", json!({"$":"ProjectCreated","id":"pl","title":"L","root":root,"at":1700000050}), json!({"$":"ThreadCreated","id":"tl","project":"pl","title":"Layout","env":"local","branch":"","worktree":"","provider":"claude","model":"","at":1700000051}));
+    let (hub, port) = up_with("layout", &more).await;
+    let _policies = crate::statehost::start(hub.hub.clone());
+    for _ in 0..60 { if crate::statehost::booted(&hub.hub) && crate::statehost::with_state_of(&hub.hub, |st| st.threads.contains_key("tl")).unwrap_or(false) { break } tokio::time::sleep(Duration::from_millis(50)).await }
+    let mut a = open(port, "&enc=json").await;
+    let hello = next(&mut a).await;
+    assert!(hello["features"].as_array().unwrap().iter().any(|f| f == "layout"));
+    let mut b = open(port, "&enc=json").await; let _ = next(&mut b).await;
+    // a phone-sized and a desktop-sized connection of one device read their own fit of the same layout
+    let r = ask(&mut a, 1, "viewer.layout", json!({"thread":"tl","bounds":[390,844],"page":"board"})).await;
+    assert_eq!(r["ok"], true, "{r}");
+    assert_eq!((r["result"]["mode"].as_str(), r["result"]["tiles"].as_array().unwrap().len()), (Some("stack"), 1));
+    assert_eq!(ask(&mut b, 1, "viewer.layout", json!({"thread":"tl","bounds":[1400,900],"page":"board"})).await["result"]["mode"], "full");
+    let r = ask(&mut a, 2, "viewer.layout.act", json!({"thread":"tl","op":"add","kind":"gerbers","bounds":[390,844]})).await;
+    assert_eq!(r["ok"], true, "{r}");
+    assert_eq!((r["result"]["tiles"].as_array().unwrap().len(), r["result"]["rev"].as_u64()), (2, Some(2)));
+    assert!(r["result"].to_string().find(&root).is_none(), "no project folder in a reply: {r}");
+    // the device's other connection is told, with no polling; it asks again and sees the same tree in its own fit
+    let push = next(&mut b).await;
+    assert_eq!(push, json!({"t":"layout","thread":"tl","rev":2}));
+    let again = ask(&mut b, 2, "viewer.layout", json!({"thread":"tl","bounds":[1400,900]})).await;
+    assert_eq!((again["result"]["rev"].as_u64(), again["result"]["mode"].as_str(), again["result"]["tiles"].as_array().unwrap().len()), (Some(2), Some("full"), 2));
+    // a refusal is {code, key, message}; a bad bounds is refused before anything is fitted
+    let e = ask(&mut a, 3, "viewer.layout.act", json!({"thread":"tl","op":"close","tile":"zz","bounds":[390,844]})).await;
+    assert_eq!((e["ok"].clone(), e["error"]["code"].as_str(), e["error"]["key"].as_str()), (json!(false), Some("notFound"), Some("viewer.layout.refusal.notfound")));
+    assert!(e["error"]["message"].as_str().is_some_and(|m| !m.is_empty()));
+    assert_eq!(ask(&mut a, 4, "viewer.layout", json!({"thread":"tl","bounds":"wide"})).await["error"]["code"], "invalidInput");
+    // a source outside the project is refused, a linked machine's thread is refused
+    assert_eq!(ask(&mut a, 5, "viewer.layout.act", json!({"thread":"tl","op":"add","kind":"gerbers","source":"../x","bounds":[390,844]})).await["error"]["code"], "invalidSource");
+    assert_eq!(ask(&mut a, 6, "viewer.layout", json!({"thread":"L~t1","bounds":[390,844]})).await["error"]["code"], "linked");
+    // an older phone that never asks is not affected: viewer.rail answers as it did
+    assert_eq!(ask(&mut a, 7, "viewer.rail", json!({"thread":"tl","page":"board"})).await["ok"], true);
 }

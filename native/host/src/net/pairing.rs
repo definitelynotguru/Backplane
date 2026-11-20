@@ -124,6 +124,10 @@ impl Registry {
         self.persist(&mut g, all, inv)?;
         Ok(n)
     }
+    /// The paired device a /ws connection belongs to (set by `resolve`; None for the hub token and for a connection that is not a device's).
+    pub fn device_of(&self, client: u64) -> Option<String> { self.inner.lock().unwrap().clients.get(&client).cloned() }
+    /// The ids of every device in the registry, browsers included.
+    pub fn device_ids(&self) -> Vec<String> { self.inner.lock().unwrap().devices.iter().filter(|d| d["revoked"] != true).filter_map(|d| d["id"].as_str().map(str::to_string)).collect() }
     /// The ids and token hashes paired now.
     pub fn device_keys(&self) -> Vec<(String, String)> { self.inner.lock().unwrap().devices.iter().map(|d| (d["id"].as_str().unwrap_or("").to_string(), d["hash"].as_str().unwrap_or("").to_string())).collect() }
     fn rand_hex(&self, n: usize) -> String { hex::encode((self.random)(n)) }
@@ -337,7 +341,10 @@ impl Registry {
         let devs = g.devices.iter().map(|d| if d["id"] == id { let mut y = d.clone(); y["revoked"] = json!(true); y } else { d.clone() }).collect();
         let invs = g.invites.clone();
         if let Err(e) = self.persist(&mut g, devs, invs) { return Self::err(&e) }
-        json!({"ok": true, "clients": Self::retire(&mut g, &[id.to_string()])})
+        let clients = Self::retire(&mut g, &[id.to_string()]);
+        drop(g);
+        crate::data::layout::forget_device_file(&self.home, id); // its docking layouts go with it (data/layout.rs)
+        json!({"ok": true, "clients": clients})
     }
     /// POST /auth/revoke with an invitation id: unused, it never enrolls; used, the device it paired loses
     /// access too. A machine invite's secret goes, and the link it made is removed by the caller (`peer`).
