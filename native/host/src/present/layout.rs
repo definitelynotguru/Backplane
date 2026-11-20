@@ -2416,7 +2416,7 @@ mod tests {
         }
         assert_eq!(tile_rect(&cur, "k"), tile_rect(&l, "k"));
 
-        // Descendant ratio test: 80/20 row of two 180px leaves requires 900px; inside 1200px -> min ratio 0.75
+        // The 20% child needs 180px plus half its gutter; the parent adds its own half gutter.
         let nested = Layout {
             version: LAYOUT_VERSION,
             root: Some(Node::Split {
@@ -2437,7 +2437,8 @@ mod tests {
         };
         let resized = resize(&nested, "parent", 0.4, (1200.0, 800.0), default_min_for(None), None).unwrap();
         let Node::Split { ratio, .. } = resized.root.as_ref().unwrap() else { panic!() };
-        assert!((*ratio - 0.75).abs() < 1e-4, "expected 0.75, got {ratio}");
+        let expected = ((180.0 + 4.0) / 0.2 + 4.0) / 1200.0;
+        assert!((*ratio - expected).abs() < 1e-4, "expected {expected}, got {ratio}");
     }
 
     #[test]
