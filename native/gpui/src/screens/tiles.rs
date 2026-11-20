@@ -162,8 +162,15 @@ pub(crate) fn page(app: &mut Backplane, cx: &mut Context<Backplane>, light: bool
                 if let Some(f) = &frame { picture["key"] = json!(f.key); }
                 let plot = &app.screens.plot;
                 let pv = &mut app.screens.plots[slot];
-                super::viewer::plot_pane_inner(cx,light,slot,if kind == "gerbers" { "board" } else { kind },
-                    &picture,frame.as_ref(),pv,focused,&plot.sheets,&plot.sheet_refs,None,false,None,Some(&plot.retrying),pv.last_retry)
+                let canvas = super::viewer::plot_pane_inner(cx,light,slot,if kind == "gerbers" { "board" } else { kind },
+                    &picture,frame.as_ref(),pv,focused,&plot.sheets,&plot.sheet_refs,None,false,None,Some(&plot.retrying),pv.last_retry);
+                if focused && matches!(kind, "board" | "schematic") {
+                    // The history RPC and its controls belong to the focused document.
+                    let key = picture["key"].as_str().unwrap_or_default();
+                    let history = super::histbar::bar_el(cx, light, &app.screens.plots[0], key);
+                    div().size_full().flex().flex_col()
+                        .child(div().flex_1().min_h_0().child(canvas)).child(history).into_any_element()
+                } else { canvas }
             } else { panestate::view(light,&PaneState::loading(panestate::loading_for(kind,kind == "gerbers")),None) }
         } else if let Some(page) = super::tile_pages::body_with_panel(&app.screens, thread, row, light, cx,
             if focused && kind == "review" { review_panel.take() } else { None }) {

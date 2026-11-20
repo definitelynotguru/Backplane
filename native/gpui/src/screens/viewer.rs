@@ -459,7 +459,7 @@ pub(super) fn plot_pane_inner(cx: &mut Context<Backplane>, light: bool, slot: us
     let say = super::panestate::loading_for(open, gerbers);
     // the design history bar stays under a board or schematic while a version loads or cannot be shown (screens::histbar)
     let empty_msg = string(viewer, "empty");
-    let hb = layers && matches!(open, "board" | "schematic") && !gerbers; let vkey = string(viewer, "key");
+    let hb = slot == 0 && layers && matches!(open, "board" | "schematic") && !gerbers; let vkey = string(viewer, "key");
     if !empty_msg.is_empty() && !editing {
         let st = super::panestate::PaneState::empty(trs(&empty_msg), trs(&string(viewer, "emptyNext")));
         if gerbers && viewer["gerbersVsBoard"] == true {
