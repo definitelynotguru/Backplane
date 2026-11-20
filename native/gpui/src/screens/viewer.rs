@@ -536,7 +536,7 @@ pub(super) fn plot_pane_inner(cx: &mut Context<Backplane>, light: bool, slot: us
     pv.present = strip.present;
     // Sheets: a schematic of several sheets opens a menu of them under the button (screens::sheets: the tree indented by depth, a search
     // field for a long list); a press shows that sheet, the root first
-    if sheets.len() > 1 && open == "schematic" && layers {
+    if actions.is_some() && sheets.len() > 1 && open == "schematic" && layers {
         let here = super::sheets::current(sheets, &frame.key);
         let menu = if pv.sheets_open {
             let menu = super::sheets::menu(cx, light, 0, sheets, &mut pv.sheets, here);
@@ -585,7 +585,7 @@ pub(super) fn plot_pane_inner(cx: &mut Context<Backplane>, light: bool, slot: us
     }
     col = col.children(note);
     let mut area = div().relative().flex().flex_col().flex_1().min_h_0().child(super::plotview::canvas_el(cx, slot, pv.focus.clone(), light, frame, view, crate::viewers::layers::masks(viewer)));
-    if layers { if let Some(p) = crate::viewers::layers::panel_el(cx, light, &strip, pv.layers_open, pv.layers_cap.unwrap_or(0.), &pv.layers_scroll) { area = area.child(p); } }
+    if layers { if let Some(p) = crate::viewers::layers::panel_el(cx, slot, light, &strip, pv.layers_open, pv.layers_cap.unwrap_or(0.), &pv.layers_scroll) { area = area.child(p); } }
     // the card of the piece last tapped (Insp.card): what it is, then key = value rows; a tap on nothing, or Close, puts it away
     // a probed part placed on another sheet of the design: where it is, and a press to open that sheet (0.14's probe-away)
     if open == "schematic" {
@@ -1027,6 +1027,9 @@ pub fn page(cx: &mut Context<Backplane>, reg: &Reg, light: bool, files_ui: &supe
         else { let a = if migrated { let h = header(cx); pane_header(light, h.identity, vec![], h.controls) } else { bar(light).child(div().flex_1()).child(acts(cx)).into_any_element() }; let secs = pv.loading.track_now(&format!("open:{open}")); pane_body_state(light, &super::panestate::PaneState::loading(super::panestate::loading_line(&trs("Opening…"), secs, 0)), Some(a), None) };
     if editing { pv.loading.clear(); }
     let container = crate::ui::with_rect(div().id("viewer-body").size_full(), || format!("tile-page:{page_key}"));
+    let container = if !editing && viewer["layout"]["root"]["type"] == "tile" {
+        container.relative().child(tile_menu.bounds_probe(thread["id"].as_str().unwrap_or_default(),viewer["layout"]["root"]["id"].as_str().unwrap_or_default()))
+    } else { container };
     // Keep main's exact scroll parent for the embedded editor (`editing`) and scrollable pages (Review, Diff, Mech);
     // only 3D (when not editing) joins files/image/pdf/text in omitting overflow_y_scroll so 3D's size_full() does not collapse under mgmt::host.
     if (matches!(open, "files" | "image" | "pdf" | "text" | "3d") || (shared_scroll && open == "review")) && !diff_on && !editing { container.child(body).into_any_element() } else { container.overflow_y_scroll().child(body).into_any_element() }

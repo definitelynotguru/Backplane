@@ -8,7 +8,7 @@ use serde_json::Value;
 #[derive(Default)]
 pub(crate) struct RailRow<'a> {
     pub id: &'a str, pub label: &'a str, icon: &'a str, group: &'a str, pub key: &'a str,
-    pub state: &'a str, why: &'a str,
+    pub state: &'a str, why: &'a str, present: bool,
 }
 
 pub(crate) fn rail_rows(viewer: &Value, simulation: bool) -> Vec<RailRow<'_>> {
@@ -16,7 +16,7 @@ pub(crate) fn rail_rows(viewer: &Value, simulation: bool) -> Vec<RailRow<'_>> {
         return rows.iter().filter(|r| simulation || r["id"] != "simulation").map(|row| {
             let field = |name: &str| row[name].as_str().unwrap_or("");
             RailRow { id: field("id"), label: field("label"), icon: field("icon"), group: field("group"),
-                key: field("key"), state: field("state"), why: field("why") }
+                key: field("key"), state: field("state"), why: field("why"), present: row["present"] == true }
         }).collect();
     }
     // Older hubs send choices and simFrame. Keep their existing rail and grouping.
@@ -1011,7 +1011,7 @@ impl Render for Backplane {
             let icon_resolved = art::icon_name(row.icon);
             let mut button = with_rect(div().id(SharedString::from(format!("rail-{}", row.label))), || format!("rail:{}", row.label))
                 .relative().flex().flex_col().items_center().h(crate::scale::tpx(48.)).flex_shrink_0().justify_center().gap_1().text_size(px(label_size))
-                .border_l_2().border_color(gpui::transparent_black())
+                .border_l_2().border_color(if row.present { gpui::Rgba { a: 0.6, ..c("accent") } } else { gpui::transparent_black().into() })
                 .when(active, |d| d.bg(c("raise")).border_color(c("accent")))
                 .text_color(c(if active { "text" } else if disabled { "rail-disabled" } else { "dim" }))
                 .child(ic(light, icon_resolved.unwrap_or("folder"), 18., if active { "accent" } else if disabled { "rail-disabled-icon" } else { "dim" })).child(div().max_w_full().when(ellipsis, |d| d.whitespace_nowrap().overflow_hidden().text_ellipsis()).child(label));
@@ -1038,15 +1038,29 @@ impl Render for Backplane {
                         key: letter.into(), keycap_drawn: cap_drawn, keycap_eligible: letter.chars().count() == 1,
                     });
                 }
+                let layout = &thread["viewer"]["layout"];
+                let add_beside = !is_tool && id != "split" && layout["focus"].is_string()
+                    && !(can_embed && crate::screens::viewer::holds_editor(thread) && layout["root"]["type"] != "split" && self.kicad_for(thread,cx).is_some());
+                let mut tooltip = crate::keys::tip_text(&trs(row.label), &hint);
+                if add_beside {
+                    tooltip.push('\n');
+                    tooltip.push_str(&crate::i18n::t("viewer.tile.rail.add"));
+                    let kind = id.to_owned();
+                    button = button.on_mouse_up(MouseButton::Middle, cx.listener(move |this, _, _, cx| {
+                        crate::screens::tile_menu::rail_add(this, &kind, cx);
+                        cx.stop_propagation();
+                    }));
+                }
                 button = button.cursor_pointer().hover(|s| s.bg(c("raise")).text_color(c("text")))
-                    .tooltip(crate::keys::tip(row.label, &hint, light)).children(cap_el);
+                    .tooltip(crate::keys::tip_raw(&tooltip, "", light)).children(cap_el);
                 let action = match id {
                     "terminal" => Ctl::ToggleTerminal, "commands" => Ctl::OpenPalette, "simulation" => Ctl::KicadAct("simulation".into()),
                     "diff" => Ctl::Node("diff".into(), "".into()), _ => Ctl::Rail(id.into()),
                 };
                 ctl.push(CtlEntry { id: format!("rail:{}", row.label), label: row.label.into(), ctl: action });
                 let id = id.to_owned();
-                button = button.on_click(cx.listener(move |this, _, window, cx| match id.as_str() {
+                button = button.on_click(cx.listener(move |this, event: &ClickEvent, window, cx| match id.as_str() {
+                    kind if add_beside && event.modifiers().shift => crate::screens::tile_menu::rail_add(this, kind, cx),
                     "terminal" => this.term_toggle(window, cx), "commands" => this.palette_open(cx),
                     "simulation" => this.open_simulation(cx), "diff" => this.rail_press("diff", "", cx),
                     kind => this.rail_press("view-kind", kind, cx),
@@ -1390,10 +1404,11 @@ mod tests {
     #[test]
     fn rail_rows_follow_hub_order_content_and_empty_list() {
         let viewer = json!({"rail":[
-            {"id":"files","label":"Project files","icon":"folder","group":"work","state":"on","key":"f"},
+            {"id":"files","label":"Project files","icon":"folder","group":"work","state":"on","key":"f","present":true},
             {"id":"board","label":"Board","icon":"cpu","group":"design","state":"disabled","key":"b","why":"No board"}]});
         let rows = rail_rows(&viewer, false);
         assert_eq!(rows.len(), 2);
+        assert!(rows[0].present && !rows[1].present);
         assert_eq!((rows[0].id, rows[0].label, rows[0].state), ("files", "Project files", "on"));
         assert_eq!((rows[1].icon, rows[1].group, rows[1].key, rows[1].state, rows[1].why), ("cpu", "design", "b", "disabled", "No board"));
         assert!(rail_rows(&json!({"rail":[]}), true).is_empty());

@@ -52,7 +52,7 @@ pub(crate) fn resolve_selector(sel: &str, tiles: &[Value], splitters: &[Value]) 
 }
 
 #[derive(Clone, Debug)]
-/* i18n-ok: scripted e2e input and its metrics, not drawn */ pub enum Step { /** {"clipboard":"text"}: the system clipboard, for a Ctrl+V keystroke after it */ Clipboard(String), /** Escape, as the person presses it */ Escape, /** the last frame's painted text, boxes and named divs (BACKPLANE_GPUI_AUDIT=1) */ Audit(String), PairFill(String, String, String), /** keystrokes typed as the person would ("ctrl-j e c h o enter"), through the window's bindings */ Keys(String), Cef(Value), Browser(Value), /** {"kicad":{"report":true}}: the embedded editor's report */ Kicad(Value), Files(String), /** {"mgmt":"bom:set:mpn=X"}: a management panel's press or edit (screens/mgmt.rs `act`) */ Mgmt(String), ScrollState(String), Home(usize), Select(usize), Tap(f32, f32, usize), Sheets(bool), Compare(Option<usize>), Hist(Option<i64>), HistMode(u8), HistPlay, ViewShow(String, String), Popup(String), Type(String), Send, Attach(String), Action(String, String), Field(String, String), Wait(u64), Record(Option<String>), Click(String), /** {"press":id}: the click, not waiting for the hub to answer it (a person watching the window meanwhile: the tab-loading e2e) */ Press(String), /** {"click":id,"within":ms}: the click, retried every 250 ms until the control exists or ms runs out (a view still drawing) */ ClickWithin(String, u64), Imp(String), Read(String), View(String), Layers(bool, Option<f32>, f32), Expect(String), Pan(f32, f32), Zoom(f32, f32, f32), Scroll(f32), NetSleep(f64), Mark(String), /** {"shot":"<name>","settle":"<kind>"?,"timeout_ms":N?}: wait until settled (if requested) and painted, emit shot-ready, wait for <BACKPLANE_GPUI_SHOT_DIR>/<name>.done */ Shot { name: String, settle: Option<String>, timeout_ms: u64 }, /** {"wait_settled":"<kind>","tag":"<tag>","timeout_ms":N?}: wait until the page settles and emit a `settled` metric with its viewer state */ WaitSettled { kind: String, tag: String, timeout_ms: u64 }, /** {"pointer":"<control id>"}: a real mouse move, down and up at the centre of the control's drawn rect, through the window's own dispatch (no registered control needed) */ Pointer(String), /** {"drag":{"splitter":"@splitter"|id,"dx":N,"dy":N,"moves":N}}: a pointer drag on a drawn splitter, along its axis */ Drag(Value), /** {"tap_mm":[x,y,slot]}: a tap at a board point in millimetres (a part's position from the design file), wherever the view has put it */ TapMm(f32, f32, usize), Fit, Unsupported(String) }
+/* i18n-ok: scripted e2e input and its metrics, not drawn */ pub enum Step { /** {"clipboard":"text"}: the system clipboard, for a Ctrl+V keystroke after it */ Clipboard(String), /** Escape, as the person presses it */ Escape, /** the last frame's painted text, boxes and named divs (BACKPLANE_GPUI_AUDIT=1) */ Audit(String), PairFill(String, String, String), /** keystrokes typed as the person would ("ctrl-j e c h o enter"), through the window's bindings */ Keys(String), Cef(Value), Browser(Value), /** {"kicad":{"report":true}}: the embedded editor's report */ Kicad(Value), Files(String), /** {"mgmt":"bom:set:mpn=X"}: a management panel's press or edit (screens/mgmt.rs `act`) */ Mgmt(String), ScrollState(String), Home(usize), Select(usize), Tap(f32, f32, usize), Sheets(bool), Compare(Option<usize>), Hist(Option<i64>), HistMode(u8), HistPlay, ViewShow(String, String), Popup(String), Type(String), Send, Attach(String), Action(String, String), Field(String, String), Wait(u64), Record(Option<String>), Click(String), /** {"press":id}: the click, not waiting for the hub to answer it (a person watching the window meanwhile: the tab-loading e2e) */ Press(String), /** {"click":id,"within":ms}: the click, retried every 250 ms until the control exists or ms runs out (a view still drawing) */ ClickWithin(String, u64), Imp(String), Read(String), View(String), Layers(bool, Option<f32>, f32), Expect(String), Pan(f32, f32), Zoom(f32, f32, f32), Scroll(f32), NetSleep(f64), Mark(String), /** {"shot":"<name>","settle":"<kind>"?,"timeout_ms":N?}: wait until settled (if requested) and painted, emit shot-ready, wait for <BACKPLANE_GPUI_SHOT_DIR>/<name>.done */ Shot { name: String, settle: Option<String>, timeout_ms: u64 }, /** {"wait_settled":"<kind>","tag":"<tag>","timeout_ms":N?}: wait until the page settles and emit a `settled` metric with its viewer state */ WaitSettled { kind: String, tag: String, timeout_ms: u64 }, /** {"pointer":"<control id>"}: a real mouse move, down and up at the centre of the control's drawn rect, through the window's own dispatch (no registered control needed) */ Pointer { id: String, shift: bool, middle: bool }, /** {"drag":{"splitter":"@splitter"|id,"dx":N,"dy":N,"moves":N}}: a pointer drag on a drawn splitter, along its axis */ Drag(Value), /** {"tap_mm":[x,y,slot]}: a tap at a board point in millimetres (a part's position from the design file), wherever the view has put it */ TapMm(f32, f32, usize), Fit, Unsupported(String) }
 /// Script coordinates use physical window pixels, as do the painted control rectangles.
 #[derive(Clone, Debug)]
 pub struct Drag { to: [f32; 2], moves: usize }
@@ -179,7 +179,12 @@ pub fn load(path: &Path) -> VecDeque<Step> {
         else if let (Some(id), Some(ms)) = (v["click"].as_str(), v["within"].as_u64()) { Some(Step::ClickWithin(id.into(), ms)) }
         else if let Some(id) = v["click"].as_str() { Some(Step::Click(id.into())) }
         else if let Some(id) = v["press"].as_str() { Some(Step::Press(id.into())) }
-        else if let Some(id) = v["pointer"].as_str() { Some(Step::Pointer(id.into())) }
+        else if let Some(id) = v["pointer"].as_str() { match (v.get("modifier"), v.get("button")) {
+            (m, b) if m.is_none_or(|m| matches!(m.as_str(), Some("none" | "shift")))
+                && b.is_none_or(|b| matches!(b.as_str(), Some("left" | "middle"))) =>
+                Some(Step::Pointer { id: id.into(), shift: v["modifier"] == "shift", middle: v["button"] == "middle" }),
+            _ => Some(Step::Unsupported("pointer_options".into())),
+        } }
         else if let Some(op) = v["imp"].as_str() { Some(Step::Imp(op.into())) }
         else if let Some(what) = v["read"].as_str() { Some(Step::Read(what.into())) }
         else if let Some(on) = v["layers"].as_bool() { Some(Step::Layers(on, v["max_h"].as_f64().map(|x| x as f32), v["scroll"].as_f64().unwrap_or(0.0) as f32)) }
@@ -782,7 +787,9 @@ impl Backplane {
                 self.begin_for(format!("wait_settled:{tag}"), Goal::WaitSettled { kind, tag, timeout_ms, polling: false }, fail_s, cx);
                 cx.notify();
             }
-            Step::Pointer(id) => {
+            Step::Pointer { id, shift, middle } => {
+                let modifier = if shift { "shift" } else { "none" };
+                let button_name = if middle { "middle" } else { "left" };
                 // Real pointer route: what a person's mouse does at the control's drawn rect, dispatched through GPUI's own window input.
                 // Deferred: the click handlers update this entity, so the dispatch must run after this update has ended.
                 let rect = crate::art::ctl_rects().get(id.as_str()).copied().filter(|r| r[2] > 0. && r[3] > 0.);
@@ -794,12 +801,14 @@ impl Backplane {
                         cx.defer(move |cx| {
                             let ok = win.update(cx, |_, window, cx| {
                                 use gpui::{MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, Modifiers, PlatformInput};
-                                window.dispatch_event(PlatformInput::MouseMove(MouseMoveEvent { position: at, pressed_button: None, modifiers: Modifiers::default() }), cx);
-                                window.dispatch_event(PlatformInput::MouseDown(MouseDownEvent { button: MouseButton::Left, position: at, modifiers: Modifiers::default(), click_count: 1, first_mouse: false }), cx);
-                                window.dispatch_event(PlatformInput::MouseUp(MouseUpEvent { button: MouseButton::Left, position: at, modifiers: Modifiers::default(), click_count: 1 }), cx);
+                                let modifiers = Modifiers { shift, ..Default::default() };
+                                let button = if middle { MouseButton::Middle } else { MouseButton::Left };
+                                window.dispatch_event(PlatformInput::MouseMove(MouseMoveEvent { position: at, pressed_button: None, modifiers }), cx);
+                                window.dispatch_event(PlatformInput::MouseDown(MouseDownEvent { button, position: at, modifiers, click_count: 1, first_mouse: false }), cx);
+                                window.dispatch_event(PlatformInput::MouseUp(MouseUpEvent { button, position: at, modifiers, click_count: 1 }), cx);
                             }).is_ok();
                             entity.update(cx, |this, cx| {
-                                this.m("pointer", json!({"id": id, "hit_rect": true, "x": r[0] + r[2] / 2., "y": r[1] + r[3] / 2., "dispatched": ok}));
+                                this.m("pointer", json!({"id": id, "modifier": modifier, "button": button_name, "error": if ok { None } else { Some("window_closed") }, "hit_rect": true, "x": r[0] + r[2] / 2., "y": r[1] + r[3] / 2., "dispatched": ok}));
                                 this.ui_epoch += 1;
                                 cx.notify();
                                 this.pump(cx);
@@ -807,7 +816,7 @@ impl Backplane {
                         });
                     }
                     _ => {
-                        /* i18n-ok: test-mode script diagnostic */ self.m("pointer", json!({"id": id, "hit_rect": false, "dispatched": false, "error": if rect.is_none() { "no drawn rect" } else { "no window" }}));
+                        /* i18n-ok: test-mode script diagnostic */ self.m("pointer", json!({"id": id, "modifier": modifier, "button": button_name, "x": rect.map(|r| r[0]+r[2]/2.), "y": rect.map(|r| r[1]+r[3]/2.), "hit_rect": rect.is_some(), "dispatched": false, "error": if rect.is_none() { "no drawn rect" } else { "no window" }}));
                         cx.defer(move |cx| entity.update(cx, |this, cx| this.pump(cx)));
                     }
                 }
@@ -1395,6 +1404,17 @@ mod tests {
         let steps = load(&p);
         assert!(matches!(&steps[0], Step::ClickWithin(id, 8000) if id == "ui:Edit"), "{:?}", steps[0]);
         assert!(matches!(&steps[1], Step::Click(id) if id == "ui:Edit"), "{:?}", steps[1]);
+    }
+    #[test] fn pointer_steps_keep_the_requested_button_and_modifier() {
+        let path = crate::tmp::file("script", "pointer.json");
+        std::fs::write(&path, r#"[{"pointer":"rail:Board"},{"pointer":"rail:Board","modifier":"shift"},{"pointer":"rail:Board","button":"middle"},{"pointer":"rail:Board","modifier":"unknown"}]"#).unwrap();
+        let steps = load(&path);
+        assert!(matches!(steps.as_slice(), [
+            Step::Pointer { shift: false, middle: false, .. },
+            Step::Pointer { shift: true, middle: false, .. },
+            Step::Pointer { shift: false, middle: true, .. },
+            Step::Unsupported(_),
+        ]));
     }
     #[test] fn shot_step_loads_name_and_settle_options() {
         let p = crate::tmp::file("script", "shot.json");

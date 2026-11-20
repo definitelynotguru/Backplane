@@ -48,7 +48,46 @@ pub(super) fn focused_files(thread: &Value) -> &Value {
     &viewer["files"]
 }
 
-pub(super) fn tools(cx: &Context<Backplane>, thread: &Value, row: &Value) -> Vec<Tool> {
+pub(super) fn tools(
+    cx: &Context<Backplane>,
+    screens: &Screens,
+    thread: &Value,
+    row: &Value,
+) -> Vec<Tool> {
+    if matches!(
+        row["kind"].as_str(),
+        Some("board" | "gerbers" | "schematic")
+    ) {
+        let Some(id) = row["id"].as_str() else {
+            return vec![];
+        };
+        let Some(frame) = screens.tile_frame(id) else {
+            return vec![];
+        };
+        let Some(slot) = screens.plots.tile_slot(id) else {
+            return vec![];
+        };
+        if row["error"].is_string() || row["empty"].is_string() || !frame.none.is_empty() {
+            return vec![];
+        }
+        let present = frame
+            .chunks
+            .iter()
+            .map(|chunk| (chunk.layer, chunk.color))
+            .collect();
+        let strip = crate::viewers::layers::strip(row, &present);
+        if strip.rows.is_empty() {
+            return vec![];
+        }
+        let mut layers = super::pane_header::button(
+            cx,
+            format!("tile:{id}:layers"),
+            trs(&strip.head),
+            super::pane_header::Press::TileLayers(id.to_owned()),
+        );
+        layers.active = (focused(thread, row) && screens.plots[slot].layers_open) || strip.mode > 0;
+        return vec![layers];
+    }
     if !focused(thread, row) {
         return vec![];
     }
@@ -199,7 +238,9 @@ pub(super) fn body_with_panel(
             ),
         },
         "simulation" => panestate::view(
-            light, &PaneState::empty(t("viewer.tile.simulation.single"), String::new()), None,
+            light,
+            &PaneState::empty(t("viewer.tile.simulation.single"), String::new()),
+            None,
         ),
         _ => return None,
     };
@@ -322,8 +363,8 @@ pub(crate) fn settled(
 
 #[cfg(test)]
 mod tests {
-    use core::prelude::v1::test;
     use super::*;
+    use core::prelude::v1::test;
     use serde_json::json;
 
     #[test]

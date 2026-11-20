@@ -4578,10 +4578,16 @@ viewer.layout.refusal.unknownframe	Unknown KiCad frame	不明な KiCad フレー
 viewer.layout.refusal.invalidinput	Invalid layout request	無効なレイアウト要求です	Solicitud de diseño no válida
 viewer.layout.refusal.toomany	Too many tiles open	タイルが多すぎます	Demasiados mosaicos abiertos
 viewer.layout.refusal.toomanysources	Too many sources in one layout	レイアウトのソースが多すぎます	Demasiadas fuentes en un diseño
+viewer.tile.rail.add	Shift-click or middle-click to add beside the focused tile.	Shift＋クリックまたは中央クリックで、選択中のタイルの隣に追加します。	Mayús+clic o clic central para añadir junto al panel activo.
 viewer.tile.add	Add beside	隣に追加	Añadir al lado
 viewer.tile.focus	Focus tile	タイルを選択	Enfocar panel
 viewer.tile.embedded	Return to the viewer to add a tile beside this one.	隣にタイルを追加するにはビューアーに戻ってください。	Vuelve al visor para añadir un panel al lado.
 viewer.tile.simulation.single	Close the other tiles to open Simulation in KiCad.	ほかのタイルを閉じると、KiCad でシミュレーションを開けます。	Cierra los demás paneles para abrir Simulación en KiCad.
+viewer.tile.add.tip	Add beside…	隣に追加…	Añadir al lado…
+viewer.tile.left	Add on the left	左に追加	Añadir a la izquierda
+viewer.tile.right	Add on the right	右に追加	Añadir a la derecha
+viewer.tile.top	Add above	上に追加	Añadir arriba
+viewer.tile.bottom	Add below	下に追加	Añadir abajo
 """#
 
     /// thread.count = {n, plural, one {# thread} other {# threads}}

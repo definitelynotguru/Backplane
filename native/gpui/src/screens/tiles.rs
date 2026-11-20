@@ -32,8 +32,8 @@ fn ratio_range(axis: usize, size: [f32; 2], limits: &Value) -> Option<(f32, f32)
     let cross = 1 - axis;
     let dim = |child: usize, d: usize| limits[child][d].as_f64().map(|v| v as f32);
     if size[cross] < dim(0,cross)?.max(dim(1,cross)?) || size[axis] <= 0. { return None }
-    let lo = dim(0,axis)? / size[axis];
-    let hi = 1. - dim(1,axis)? / size[axis];
+    let lo = (dim(0,axis)? + 4.) / size[axis];
+    let hi = 1. - (dim(1,axis)? + 4.) / size[axis];
     (lo <= hi).then_some((lo,hi))
 }
 
@@ -58,15 +58,8 @@ pub(super) fn tree(app: &Backplane, cx: &mut Context<Backplane>, viewer: &Value,
             app.ui_epoch += 1; cx.notify();
         }
     };
-    let root_node = &viewer["layout"]["root"];
-    let limits = &viewer["splitLimits"][root_node["id"].as_str().unwrap_or_default()];
-    let axis = usize::from(root_node["axis"] == "col");
-    let minimum = |d: usize| {
-        let a = limits[0][d].as_f64().unwrap_or_default() as f32;
-        let b = limits[1][d].as_f64().unwrap_or_default() as f32;
-        if d == axis { a + b } else { a.max(b) }
-    };
-    let surface = div().id("dock-root").relative().size_full().min_w(px(minimum(0))).min_h(px(minimum(1))).child(size_probe(root)).child(content)
+    let surface = div().id("dock-root").relative().size_full().min_w_0().min_h_0().overflow_hidden()
+        .child(size_probe(root)).child(content)
         .on_mouse_move(cx.listener(|app,e:&MouseMoveEvent,_,cx| {
             if let Some(drag) = app.screens.dock.drag.as_mut() {
                 let ratio = drag.at(e.position);
@@ -75,7 +68,7 @@ pub(super) fn tree(app: &Backplane, cx: &mut Context<Backplane>, viewer: &Value,
         }))
         .on_mouse_up(MouseButton::Left,cx.listener(release))
         .on_mouse_up_out(MouseButton::Left,cx.listener(release));
-    div().id("dock-viewport").size_full().overflow_scroll().child(surface).into_any_element()
+    surface.into_any_element()
 }
 
 fn branch(app: &Backplane, cx: &mut Context<Backplane>, viewer: &Value, node: &Value,
@@ -93,30 +86,32 @@ fn branch(app: &Backplane, cx: &mut Context<Backplane>, viewer: &Value, node: &V
     let base = div().size_full().relative().flex().min_w_0().min_h_0().child(size_probe(size.clone()));
     let base = if axis == 0 { base.flex_row() } else { base.flex_col() };
     let first = div().flex_none().min_w_0().min_h_0().overflow_hidden();
-    let first = if axis == 0 { first.w(relative(ratio)).h_full() } else { first.h(relative(ratio)).w_full() };
+    let first = if axis == 0 { first.w(relative(ratio)).h_full().pr(px(4.)) } else { first.h(relative(ratio)).w_full().pb(px(4.)) };
     let split = id.to_owned();
     let limits = viewer["splitLimits"][id].clone();
     let root = root.clone();
+    let dragging = app.screens.dock.drag.as_ref().is_some_and(|d| d.split == id && d.thread == thread);
     let bar = div().id(SharedString::from(format!("dock-edge-{id}"))).absolute().flex().items_center().justify_center();
-    let bar = if axis == 0 { bar.left(relative(ratio)).ml(px(-5.)).w(px(10.)).h_full().cursor_col_resize() }
-        else { bar.top(relative(ratio)).mt(px(-5.)).h(px(10.)).w_full().cursor_row_resize() };
+    let bar = if axis == 0 { bar.left(relative(ratio)).ml(px(-6.)).w(px(12.)).h_full().cursor_col_resize() }
+        else { bar.top(relative(ratio)).mt(px(-6.)).h(px(12.)).w_full().cursor_row_resize() };
     let group = SharedString::from(format!("dock-grip-{id}"));
     let accent = theme::color(light,"accent");
-    let line = if axis == 0 { div().absolute().w(px(1.)).h_full() } else { div().absolute().h(px(1.)).w_full() };
-    let grip = if axis == 0 { div().w(px(3.)).h(px(28.)) } else { div().h(px(3.)).w(px(28.)) };
-    let bar = bar.group(group.clone()).child(line.bg(theme::color(light,"line")))
-        .child(grip.bg(accent).opacity(0.).group_hover(group, |s| s.opacity(1.)))
+    let line = if axis == 0 { div().absolute().w(px(8.)).h_full() } else { div().absolute().h(px(8.)).w_full() };
+    let grip = if axis == 0 { div().w(px(3.)).h(px(36.)) } else { div().h(px(3.)).w(px(36.)) };
+    let bar = bar.group(group.clone()).child(line.bg(theme::color(light,"panel")))
+        .child(grip.bg(if dragging { accent } else { theme::color(light,"dim") }).group_hover(group, move |s| s.bg(accent)))
         .on_mouse_down(MouseButton::Left,cx.listener(move |app,e:&MouseDownEvent,_,cx| {
             let dims = size.get();
             if let Some(range) = ratio_range(axis,dims,&limits) {
                 app.screens.dock.drag = Some(Resize { thread:thread.clone(), split:split.clone(), axis,
                     start:[e.position.x.into(),e.position.y.into()][axis], initial, ratio:initial,
                     extent:dims[axis],range,root:root.get() });
+                app.ui_epoch += 1; cx.notify();
                 cx.stop_propagation();
             }
         }));
     // with_rect makes its element relative in test mode. Keep the hitbox absolutely positioned.
-    base.child(first.child(a)).child(div().flex_1().min_w_0().min_h_0().overflow_hidden().child(b))
+    base.child(first.child(a)).child(div().flex_1().min_w_0().min_h_0().overflow_hidden().map(|d| if axis == 0 {d.pl(px(4.))} else {d.pt(px(4.))}).child(b))
         .child(bar.child(with_rect(div().size_full(),||format!("splitter:{id}")))).into_any_element()
 }
 
@@ -128,9 +123,9 @@ mod tests {
     #[test]
     fn a_nested_child_and_the_cross_axis_bound_a_drag() {
         let limits = json!([[360,180],[180,300]]);
-        assert_eq!(ratio_range(0,[720.,300.],&limits),Some((0.5,0.75)));
+        assert_eq!(ratio_range(0,[720.,300.],&limits),Some((364./720.,1.-184./720.)));
         assert_eq!(ratio_range(0,[720.,299.],&limits),None);
-        assert_eq!(ratio_range(1,[360.,480.],&limits),Some((0.375,0.375)));
+        assert_eq!(ratio_range(1,[360.,480.],&limits),None);
     }
 }
 
@@ -146,7 +141,7 @@ pub(crate) fn page(app: &mut Backplane, cx: &mut Context<Backplane>, light: bool
         if layout["maximized"].as_str().is_some_and(|shown| shown != id) { continue; }
         let kind = row["kind"].as_str().unwrap_or_default();
         let focused = layout["focus"] == id.as_str();
-        let header = Header { identity: Identity::new(kind, &row["identity"]),
+        let header = Header { identity: Identity::new(kind, &row["identity"]).tile(focused),
             controls: Controls { tools: vec![], close: Empty.into_any_element() } };
         let header = super::tile_menu::decorate(cx,light,thread,row,false,&app.screens.tile_menu,header);
         let body = if let Some(reason) = row["error"].as_str() {
@@ -162,7 +157,7 @@ pub(crate) fn page(app: &mut Backplane, cx: &mut Context<Backplane>, light: bool
                 let plot = &app.screens.plot;
                 let pv = &mut app.screens.plots[slot];
                 super::viewer::plot_pane_inner(cx,light,slot,if kind == "gerbers" { "board" } else { kind },
-                    &picture,frame.as_ref(),pv,false,&plot.sheets,&plot.sheet_refs,None,false,None,Some(&plot.retrying),pv.last_retry)
+                    &picture,frame.as_ref(),pv,focused,&plot.sheets,&plot.sheet_refs,None,false,None,Some(&plot.retrying),pv.last_retry)
             } else { panestate::view(light,&PaneState::loading(panestate::loading_for(kind,kind == "gerbers")),None) }
         } else if let Some(page) = super::tile_pages::body_with_panel(&app.screens, thread, row, light, cx,
             if focused && kind == "review" { review_panel.take() } else { None }) {
@@ -180,7 +175,8 @@ pub(crate) fn page(app: &mut Backplane, cx: &mut Context<Backplane>, light: bool
             .on_mouse_down(MouseButton::Left,cx.listener(move |this,_,_,_| {
                 if !focused { let _ = this.tx.try_send(Command::Action("layout-focus".into(),json!({"tile":key}).to_string())); }
             }))
-            .child(pane_header(light,header.identity,super::tile_pages::tools(cx,thread,row),header.controls)).child(body);
+            .child(app.screens.tile_menu.bounds_probe(thread["id"].as_str().unwrap_or_default(),id))
+            .child(pane_header(light,header.identity,super::tile_pages::tools(cx,&app.screens,thread,row),header.controls)).child(body);
         leaves.insert(id.clone(),tile.into_any_element());
     }
     if let Some(id) = layout["maximized"].as_str() {

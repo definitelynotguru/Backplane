@@ -49,6 +49,7 @@ clearance (fail-closed on missing/failed `inspect_ok`, native dialogs, or unclea
 from __future__ import annotations
 
 import json
+import os
 import re
 from pathlib import Path
 
@@ -78,6 +79,40 @@ INCOMPATIBLE_OVERLAY_CODES = {
 RAW_REFUSAL_CODE_RE = re.compile(
     r"\b(ERR_[A-Z0-9_]+|INTERNAL_[A-Z0-9_]+|PRESENTER_[A-Z0-9_]+|ECONNREFUSED|ENOENT|HTTP\s+5\d\d|Refusal::|panic|backtrace|incompatibleOverlay)\b"
 )
+
+
+# Logical-pixel minima and gutter from present/layout.rs for the Board/Schematic trials.
+def _direction_fits(axis: str, width: float, height: float) -> bool:
+    """The splitter takes eight logical pixels between the two tile minima.
+
+    >>> _direction_fits("x", 367, 760), _direction_fits("x", 368, 760)
+    (False, True)
+    """
+    along, across = (width, height) if axis == "x" else (height, width)
+    return along >= 2 * 180 + 8 and across >= 180
+
+
+def _default_stacks(width: float, height: float) -> bool:
+    """The default uses the target tile dimensions.
+
+    >>> [_default_stacks(w, 800) for w in (320, 375, 616, 1040)]
+    [True, True, False, False]
+    """
+    return _direction_fits("y", width, height) and (
+        not _direction_fits("x", width, height) or (width < height and width < 3 * 180 + 8))
+
+
+def _resize_fraction(rects, axis):
+    """Measure the first tile along the splitter's actual axis.
+
+    >>> _resize_fraction([(8,101,300,300), (8,0,300,100)], "y")
+    0.25
+    >>> _resize_fraction([(205,0,200,400), (0,0,200,400)], "x")
+    0.5
+    """
+    pos = 0 if axis == "x" else 1
+    first, second = sorted(rects, key=lambda rect: rect[pos])
+    return first[pos+2] / (first[pos+2] + second[pos+2])
 
 
 def axis_from_hub(hub_axis: str | None) -> str | None:
@@ -378,15 +413,16 @@ def build_b7_steps(settle_timeout_ms: int = 15000) -> list[dict]:
     from the drawn inventory; the drag is a pointer drag on that splitter (`ok` only if one was dispatched).
     """
     tmo = min(settle_timeout_ms, 8000)
+    minimum = (os.environ.get("RAIL_WINDOW_SIZE") or os.environ.get("RAIL_B2_SIZE")) == "minimum"
     steps: list[dict] = []
     for side in ("right", "left", "bottom", "top"):
         steps += _reset_idle(f"b7-add-{side}-idle", tmo)
         steps += [
             {"press": "rail:Board"},
-            {"wait_settled": "board", "tag": f"b7-add-{side}-start", "timeout_ms": tmo},
+            {"shot": f"b7-add-{side}-start", "settle": "board", "timeout_ms": tmo},
             {"mark": f"b7:add-{side}"},
             *_add_beside("kind=board", "schematic", side),
-            {"shot": f"b7-add-{side}", "settle": "schematic", "timeout_ms": tmo},
+            {"shot": f"b7-add-{side}", **({} if minimum and side in ("left","right") else {"settle":"schematic"}), "timeout_ms": tmo},
             {"mark": f"b7:close-{side}"},
             {"press": "@tile[kind=schematic].close"},
             {"wait": 250},
@@ -397,14 +433,15 @@ def build_b7_steps(settle_timeout_ms: int = 15000) -> list[dict]:
         {"press": "rail:Board"},
         {"wait_settled": "board", "tag": "b7-pair-start", "timeout_ms": tmo},
         {"mark": "b7:pair"},
-        *_add_beside("kind=board", "schematic", "right"),
+        *_add_beside("kind=board", "schematic"),
         {"shot": "b7-before-swap", "settle": "schematic", "timeout_ms": tmo},
         {"mark": "b7:swap"},
         {"press": "@tile[kind=schematic].swap"},
         {"wait": 300},
         {"shot": "b7-after-swap", "settle": "schematic", "timeout_ms": tmo},
         {"mark": "b7:resize-drag"},
-        {"drag": {"splitter": "@splitter[axis=x]", "dx": -90, "moves": 6}},
+        {"drag": {"splitter": "@splitter[axis=y]" if minimum else "@splitter[axis=x]",
+                  ("dy" if minimum else "dx"): -90, "moves": 6}},
         {"wait": 300},
         {"shot": "b7-after-resize", "settle": "schematic", "timeout_ms": tmo},
         {"mark": "b7:maximize"},
@@ -430,7 +467,7 @@ def build_b7_steps(settle_timeout_ms: int = 15000) -> list[dict]:
         {"wait": 300},
         {"shot": "b7-overlay-off", "settle": "board", "timeout_ms": tmo},
         {"mark": "b7:overlay-files"},
-        *_add_beside("kind=board", "files", "right"),
+        *_add_beside("kind=board", "files"),
         {"shot": "b7-overlay-incompat-before", "settle": "files", "timeout_ms": tmo},
         {"mark": "b7:overlay-incompatible"},
         {"press": "@tile[kind=files].overlay-gerbers"},
@@ -576,9 +613,19 @@ def evaluate_task4_dock(
             "evidence": {"tiles": tiles},
         }
 
-    splitter = _splitter_between(splitters, rects[0], rects[1], "x") if (len(rects) == 2 and all(rects)) else None
+    axis = "y" if init_rect and _default_stacks(init_rect[2], init_rect[3]) else "x"
+    splitter = _splitter_between(splitters, rects[0], rects[1], axis) if (len(rects) == 2 and all(rects)) else None
     if splitter is None:
-        fails.append("no vertical ('x') splitter found between Gerbers and Board tiles")
+        fails.append(f"expected a {axis}-axis splitter between Gerbers and Board")
+
+    if splitter and init_rect:
+        by_kind = {tile.get("kind"): rect for tile, rect in zip(tiles, rects)}
+        g, b = by_kind.get("gerbers"), by_kind.get("board")
+        along = 0 if axis == "x" else 1
+        if not g or not b or b[along] <= g[along]:
+            fails.append("Board did not open after Gerbers along the default axis")
+        if any(r[0] < init_rect[0]-2 or r[0]+r[2] > init_rect[0]+init_rect[2]+2 for r in rects):
+            fails.append("tile extends past the original pane edge")
 
     sources = [_tile_source(t, v_split) for t in tiles]
     if len(sources) == 2:
@@ -701,6 +748,7 @@ def evaluate_b7_dock(
         f = t.get("frame")
         return f if (isinstance(f, int) and not isinstance(f, bool)) else None
 
+    refused_sides = set()
     # 1. add_beside_directions (right, left, bottom, top)
     dir_results: dict[str, bool | str] = {}
     dir_notes: list[str] = []
@@ -721,6 +769,42 @@ def evaluate_b7_dock(
             continue
         ts = shots[sname].get("tiles") or []
         sps = shots[sname].get("splitters") or []
+        start = f"{sname}-start"
+        initial = shots.get(start, {})
+        base = initial.get("tiles") or []
+        rect = _rect_tuple(base[0].get("rect")) if len(base) == 1 else None
+        if rect and not _direction_fits(axis, rect[2], rect[3]):
+            clear, why = _shot_cleared(full_dir, start, caps_full, shots, cleared_shots)
+            if not clear:
+                dir_results[side] = "unavailable"
+                dir_notes.append(why)
+                continue
+            tile = base[0].get("id")
+            mark = f"b7:add-{side}"
+            events = _exact_chain(presses, mark, [f"tile:{tile}:add-beside", f"add-beside:schematic:{side}"])
+            before = (initial.get("viewer") or {}).get("layout") or {}
+            after = (shots[sname].get("viewer") or {}).get("layout")
+            if not events or set(layout_leaves(before)) != {tile}:
+                dir_results[side] = "unavailable"
+                dir_notes.append(f"{side}: missing initial tree or delivered directional command")
+                continue
+            ack = [r for r in refusals.get(mark, []) if events[-1]["seq"] < r["seq"] < shots[sname]["tiles_seq"]]
+            if not ack and not parsed_full.get("refusal_metric_declared"):
+                dir_results[side] = "unavailable"
+                dir_notes.append(f"{side}: refusal metric unavailable")
+                continue
+            human = (ack[-1].get("text") or "").strip() if ack else ""
+            ok = (bool(ack) and ack[-1].get("code") == "tooSmall" and bool(human)
+                  and not RAW_REFUSAL_CODE_RE.search(human) and "toosmall" not in human.lower()
+                  and before == after and len(ts) == 1 and not sps and ts[0].get("id") == tile
+                  and ts[0].get("kind") == base[0].get("kind") == "board"
+                  and _rect_close(rect, _rect_tuple(ts[0].get("rect")) or (0,0,0,0)))
+            dir_results[side] = ok
+            if ok:
+                refused_sides.add(side)
+            else:
+                dir_notes.append(f"{side}: expected localized tooSmall and unchanged Board")
+            continue
         if len(ts) != 2:
             dir_results[side] = False
             dir_notes.append(f"{side}: expected 2 tiles, got {len(ts)}")
@@ -771,7 +855,7 @@ def evaluate_b7_dock(
         checks["add_beside_directions"] = _rec("unavailable", None, "; ".join(dir_notes) or "not all 4 directions captured", {"directions": dir_results})
 
     # 2. close (missing pane geometry -> unavailable, never waived)
-    close_side = next((s for s in ("right", "left", "bottom", "top") if f"b7-close-{s}" in shots), None)
+    close_side = next((s for s in ("right", "left", "bottom", "top") if s not in refused_sides and f"b7-close-{s}" in shots), None)
     if close_side is None:
         checks["close"] = _rec("unavailable", None, "no b7-close-* shot captured")
     else:
@@ -888,13 +972,13 @@ def evaluate_b7_dock(
                     if any(x is None for x in (f_pre0, f_pre1, f_post0, f_post1)):
                         checks["resize_drag"] = _rec("unavailable", None, "tile metric missing per-tile `frame` sequence for resize")
                     else:
-                        pre_rs = sorted([_rect_tuple(pre_by_id[i].get("rect")) for i in common], key=lambda r: r[0] if r else 0)
-                        post_rs = sorted([_rect_tuple(post_by_id[i].get("rect")) for i in common], key=lambda r: r[0] if r else 0)
+                        pre_rs = [_rect_tuple(pre_by_id[i].get("rect")) for i in common]
+                        post_rs = [_rect_tuple(post_by_id[i].get("rect")) for i in common]
                         if not (all(pre_rs) and all(post_rs)):
                             checks["resize_drag"] = _rec("measured", False, "missing tile rects across resize")
                         else:
-                            r_pre = pre_rs[0][2] / (pre_rs[0][2] + pre_rs[1][2])
-                            r_post = post_rs[0][2] / (post_rs[0][2] + post_rs[1][2])
+                            r_pre = _resize_fraction(pre_rs, sp_axis)
+                            r_post = _resize_fraction(post_rs, sp_axis)
                             ratio_delta = abs(r_post - r_pre)
                             frames_adv = (f_post0 > f_pre0) and (f_post1 > f_pre1)
                             png_rsz = full_dir / "b7-after-resize.png"

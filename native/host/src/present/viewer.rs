@@ -2704,9 +2704,9 @@ pub fn layout_action(
                 return refuse(Refusal::InvalidInput);
             };
             let side = match payload.get("side") {
-                None | Some(Value::Null) => layout::Side::Right,
+                None | Some(Value::Null) => None,
                 Some(v) => match v.as_str().and_then(parse_side) {
-                    Some(s) => s,
+                    Some(s) => Some(s),
                     None => return refuse(Refusal::InvalidInput),
                 },
             };
@@ -2751,7 +2751,14 @@ pub fn layout_action(
                 unresolved_version: false,
                 overlay: None,
             };
-            layout::add(&cur, target, side, tile, guard.client_has_kicad, locked_ref)
+            let bounds = match payload.get("bounds") {
+                None => None,
+                Some(v) => match serde_json::from_value::<[f32; 2]>(v.clone()) {
+                    Ok([w,h]) if w.is_finite() && h.is_finite() && w > 0. && h > 0. => Some((w,h)),
+                    _ => return refuse(Refusal::InvalidInput),
+                },
+            };
+            layout::add_in_bounds(&cur, target, side, tile, bounds, guard.client_has_kicad, kicad_tile_ref, locked_ref)
         }
         "layout-close" => {
             let Some(tile) = payload["tile"].as_str().filter(|s| !s.is_empty()) else {
@@ -3215,7 +3222,7 @@ mod tests {
         let mut limits = serde_json::Map::new();
         split_limits(&node,&mut limits);
         let m = super::super::layout::MIN_TILE_PX;
-        assert_eq!(limits["outer"],json!([[m,m],[m,m*4.]]));
+        assert_eq!(limits["outer"],json!([[m,m],[m,(m+super::super::layout::SPLIT_GUTTER_PX/2.)*4.]]));
         assert_eq!(limits["inner"],json!([[m,m],[m,m]]));
     }
 

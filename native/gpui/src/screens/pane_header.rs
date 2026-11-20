@@ -17,6 +17,7 @@ pub struct Controls {
 
 pub struct Identity {
     pub(super) grip: Option<AnyElement>,
+    tile_focus: Option<bool>,
     page: String,
     label: String,
     rel: String,
@@ -26,6 +27,11 @@ pub struct Identity {
 }
 
 impl Identity {
+    pub(super) fn tile(mut self, focused: bool) -> Self {
+        self.tile_focus = Some(focused);
+        self
+    }
+
     pub(super) fn refusal(&mut self, message: &str) {
         self.label = message.to_owned();
         self.rel.clear();
@@ -66,7 +72,7 @@ impl Identity {
                 Some([trs(pane["label"].as_str()?).as_str(), source].join(" · "))
             }).collect::<Vec<_>>().join("\n");
         }
-        Self { grip: None, page: page.into(), label, rel, name, version, detail }
+        Self { grip: None, tile_focus: None, page: page.into(), label, rel, name, version, detail }
     }
 
     pub fn with_set_note(mut self, note: &str) -> Self {
@@ -90,6 +96,7 @@ pub enum Press {
     Edit,
     Sheets,
     Layers,
+    TileLayers(String),
     Fit(usize),
     GerbView(Vec<String>),
     Split(&'static str),
@@ -110,6 +117,19 @@ impl Press {
             Self::Edit => { this.kicad_edit(cx); }
             Self::Sheets => super::sheets::toggle(this, 0, window, cx),
             Self::Layers => crate::viewers::layers::toggle(this, cx),
+            Self::TileLayers(id) => {
+                let Some(slot) = this.screens.plots.tile_slot(id) else { return };
+                let focused = this.data["thread"]["viewer"]["layout"]["focus"] == id.as_str();
+                if !focused {
+                    let _ = this.tx.try_send(crate::hub::Command::Action("layout-focus".into(),
+                        serde_json::json!({"tile": id}).to_string()));
+                }
+                let pv = this.screens.pv(slot);
+                if focused && !pv.layers_open && super::popover::just_shut("layers") { return; }
+                pv.layers_open = !focused || !pv.layers_open;
+                this.ui_epoch += 1;
+                cx.notify();
+            }
             Self::Fit(slot) => {
                 let pv = this.screens.pv(*slot);
                 pv.touched = false;
@@ -240,8 +260,23 @@ fn layout(room: f32, more: f32, items: &[(u8, f32)]) -> Vec<bool> {
     visible
 }
 
+/// `room` is inside the measured grip and bar padding. Reserve the close
+/// button, gaps, and complete page label before assigning any inline tools.
+fn header_room(room: f32, close: f32, title_min: f32, more: f32, gap: f32,
+    widths: &[(u8, f32)], has_add: bool, docked: bool) -> (Vec<bool>, bool, f32) {
+    let inline = &widths[..widths.len() - usize::from(has_add)];
+    let available = room - close - gap - title_min;
+    let mut visible = layout(available, more + gap, inline);
+    let hover_more = has_add && !docked && visible.iter().all(|v| *v);
+    if has_add && !hover_more { visible = layout(available - more - gap, 0., inline); }
+    if has_add { visible.push(false); }
+    let used: f32 = widths.iter().zip(&visible).filter(|(_, show)| **show).map(|(item, _)| item.1).sum();
+    let more_width = if !hover_more && visible.contains(&false) { more + gap } else { 0. };
+    (visible, hover_more, room - close - gap - used - more_width)
+}
+
 fn priority(id: &str, pane_action: bool) -> u8 {
-    if id == "layers-btn" || id.starts_with("plot-fit-") || id.starts_with("rv-")
+    if id == "layers-btn" || id.starts_with("tile:") && (id.ends_with(":layers") || id.ends_with(":fit")) || id.starts_with("plot-fit-") || id.starts_with("rv-")
         || id == "fm-up" || id.starts_with("crumb-") { 0 }
     else if pane_action { 1 } else { 2 }
 }
@@ -262,6 +297,14 @@ fn shorten(identity: &Identity, basename: &str, room: f32, measure: impl Fn(&str
     candidate(lo)
 }
 
+/// A dock title keeps the page word, and includes a separator only if a real
+/// part of the source or version fits after it. The tooltip keeps the full path.
+fn tile_title(identity: &Identity, basename: &str, room: f32, measure: impl Fn(&str) -> f32) -> String {
+    if basename.is_empty() { return identity.label.clone(); }
+    let text = shorten(identity, basename, room, &measure);
+    if text == identity.text("…") || measure(&text) > room { identity.label.clone() } else { text }
+}
+
 // GPUI can measure a control at its intrinsic size, then prepaint that same element
 // at the position assigned to its canvas. This keeps nested menus and handlers intact.
 fn measured(mut el: AnyElement, w: &mut Window, cx: &mut App) -> (f32, AnyElement) {
@@ -274,6 +317,7 @@ fn measured(mut el: AnyElement, w: &mut Window, cx: &mut App) -> (f32, AnyElemen
 pub fn pane_header(light: bool, mut identity: Identity, tools: Vec<PaneTool<ToolAction>>, controls: Controls) -> AnyElement {
     let page = identity.page.clone();
     let identity_page = page.clone();
+    let tile_focus = identity.tile_focus;
     let c = move |n: &str| theme::color(light, n);
     let inner = canvas(move |bounds, w, cx| {
         let scope = controls.tools.iter().find_map(|tool| tool.id.strip_suffix(":add-beside")).unwrap_or(&page);
@@ -281,7 +325,7 @@ pub fn pane_header(light: bool, mut identity: Identity, tools: Vec<PaneTool<Tool
             (None::<usize>, cx.focus_handle().tab_stop(true), std::rc::Rc::new(std::cell::Cell::new(Bounds::<Pixels>::default())))
         });
         let (selected, focus, trigger_rect) = state.read(cx).clone();
-        let gap = 4.;
+        let gap = if tile_focus.is_some() { 2. } else { 4. };
         let more = f32::from(crate::scale::tpx(super::head::BTN_H));
         let (close_width, close) = measured(controls.close, w, cx);
         let grip = identity.grip.take().map(|el| measured(el, w, cx));
@@ -291,7 +335,9 @@ pub fn pane_header(light: bool, mut identity: Identity, tools: Vec<PaneTool<Tool
         let full = identity.text(path);
         let short = if path == basename { full.clone() } else { identity.text(&format!("…/{basename}")) };
         let measure = |s: &str| f32::from(w.text_system().shape_line(s.to_owned().into(), crate::scale::tpx(12.), &[w.text_style().to_run(s.len())], None).width).ceil();
-        let title_min = measure(&short).min(f32::from(crate::scale::tpx(150.)));
+        let title_min = if tile_focus.is_some() {
+            measure(&identity.label)
+        } else { measure(&short).min(f32::from(crate::scale::tpx(150.))) };
         let room = f32::from(bounds.size.width) - grip_room;
         let mut widths = vec![];
         let mut items = vec![];
@@ -315,21 +361,17 @@ pub fn pane_header(light: bool, mut identity: Identity, tools: Vec<PaneTool<Tool
         // Add beside lives in More. Keep the resting layout of all existing tools.
         let has_add = items.last().is_some_and(|item| item.0.ends_with(":add-beside"));
         let legacy = widths.len() - usize::from(has_add);
-        let mut visible = layout(room - close_width - gap - title_min, more + gap, &widths[..legacy]);
-        let hover_more = has_add && grip.is_none() && visible.iter().all(|v| *v);
-        if has_add && !hover_more {
-            visible = layout(room - close_width - gap - title_min - more - gap, 0., &widths[..legacy]);
-        }
-        if has_add { visible.push(false); }
-        let folded = visible.iter().any(|&v| !v);
-        let title_room = room - close_width - gap - widths.iter().zip(&visible).filter(|(_, v)| **v).map(|(i, _)| i.1).sum::<f32>()
-            - if folded && !hover_more { more + gap } else { 0. };
+        let (visible, hover_more, title_room) = header_room(room, close_width, title_min, more, gap,
+            &widths, has_add, grip.is_some());
+        let folded = visible.contains(&false);
         let measure = |s: &str| f32::from(w.text_system().shape_line(s.to_owned().into(), crate::scale::tpx(12.), &[w.text_style().to_run(s.len())], None).width).ceil();
         let text = if measure(&full) <= title_room { full.clone() } else if measure(&short) <= title_room { short }
+            else if tile_focus.is_some() { tile_title(&identity, basename, title_room, measure) }
             else { shorten(&identity, basename, title_room, measure) };
         let tooltip = [full, identity.detail].into_iter().filter(|s| !s.is_empty()).collect::<Vec<_>>().join("\n");
         let title = with_rect(div().id("pane-identity"), || format!("pane-identity:{page}:{text}"))
-            .flex_1().min_w_0().overflow_hidden().text_ellipsis().whitespace_nowrap().text_size(crate::scale::tpx(12.)).tooltip(crate::keys::tip(&tooltip, "", light)).child(text);
+            .flex_1().min_w_0().overflow_hidden().text_ellipsis().whitespace_nowrap().text_size(crate::scale::tpx(12.)).when(tile_focus == Some(false), |d| d.text_color(c("dim")))
+            .tooltip(crate::keys::tip(&tooltip, "", light)).child(text);
         let mut strip = with_rect(div().flex_none().flex().items_center().gap(px(gap)), || format!("pane-tools:{page}"));
         let mut rows = Vec::new();
         let mut actions = Vec::new();
@@ -405,12 +447,12 @@ pub fn pane_header(light: bool, mut identity: Identity, tools: Vec<PaneTool<Tool
         row.prepaint_as_root(bounds.origin, size(bounds.size.width.into(), bounds.size.height.into()), w, cx);
         row
     }, |_, mut row, w, cx| row.paint(w, cx)).size_full();
-    with_rect(div().flex_shrink_0(), || format!("pane-header:{}", identity_page)).child(viewer::bar(light).child(inner)).into_any_element()
+    with_rect(div().flex_shrink_0(), || format!("pane-header:{}", identity_page)).child(viewer::bar(light).when(tile_focus.is_some(), |d| d.px_1()).child(inner)).into_any_element()
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{layout, Identity};
+    use super::{header_room, layout, priority, tile_title, Identity};
     #[test]
     fn primary_tools_survive_before_pane_actions_and_secondary_tools() {
         for (scale, counts) in [(1., [2, 3, 4, 5]), (1.25, [1, 2, 3, 5])] {
@@ -438,6 +480,37 @@ mod tests {
         assert_eq!(id.text(&id.rel), "Gerbers · mfg/gerbers");
         assert_eq!(id.detail, "1970-01-01");
     }
+    #[test]
+    fn cramped_tile_title_only_includes_a_separator_with_source_text() {
+        let id = Identity::new("board", &json!({"source":{"rel":"directory/longboard.kicad_pcb"}})).tile(false);
+        let width = |s: &str| s.chars().count() as f32;
+        assert_eq!(tile_title(&id, "longboard.kicad_pcb", width("Board · …"), width), "Board");
+        assert_eq!(tile_title(&id, "longboard.kicad_pcb", width("Board · …b"), width), "Board · …b");
+        assert_eq!(tile_title(&id, "", 15., width), "Board");
+    }
+
+    #[test]
+    fn measured_dock_controls_keep_the_page_name_and_close_at_minimum_width() {
+        // 125%: the room has already excluded the bar padding, grip and its gap.
+        let (more, gap, close, title) = (30., 2., 22., 71.);
+        let tools = [(0, 69.), (0, 43.), (1, 100.)]; // Layers, Fit and Add beside
+        for (width, expected) in [(180., [false, false, false]), (460., [true, true, false])] {
+            let room = width - 12. - 24.;
+            let (shown, hover_more, title_room) = header_room(room, close, title, more, gap, &tools, true, true);
+            assert_eq!(shown, expected);
+            assert!(!hover_more);
+            assert!(title_room >= title);
+        }
+    }
+
+    #[test]
+    fn tile_plot_tools_fold_after_lower_priority_actions() {
+        let widths = [(priority("tile:t2:layers", false), 70.),
+            (priority("tile:t2:fit", true), 40.), (priority("vs-board", true), 90.)];
+        assert_eq!(layout(160., 30., &widths), [true, true, false]);
+        assert_eq!(layout(35., 30., &widths), [false, false, false]);
+    }
+
     #[test]
     fn split_names_the_available_design() {
         let mut facts = json!({"panes":[{"page":"schematic","source":{"rel":"amp.sch"}},{"page":"board","missing":true}]});
