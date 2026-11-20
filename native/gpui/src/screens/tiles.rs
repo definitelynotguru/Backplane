@@ -156,14 +156,19 @@ pub(crate) fn page(app: &mut Backplane, cx: &mut Context<Backplane>, light: bool
             panestate::view(light,&PaneState::empty(trs(reason),trs(row["emptyNext"].as_str().unwrap_or_default())),None)
         } else if matches!(kind, "board" | "schematic" | "gerbers") {
             let slot = app.screens.plots.tile_slot(id);
-            let frame = app.screens.tile_frame(id).cloned();
             if let Some(slot) = slot {
+                // Unfocused and versioned picture keys are opaque. The acknowledged watch
+                // resolves this tile's source independently of any frames in the cache.
+                let watch_key = app.screens.plots.tile_keys(id).first();
                 let mut picture = row.clone();
-                if let Some(f) = &frame { picture["key"] = json!(f.key); }
                 let plot = &app.screens.plot;
+                let frame = watch_key.and_then(|key| {
+                    picture["key"] = json!(key);
+                    plot.frame_for(key).filter(|frame| frame.key == *key)
+                });
                 let pv = &mut app.screens.plots[slot];
                 super::viewer::plot_pane_inner(cx,light,slot,if kind == "gerbers" { "board" } else { kind },
-                    &picture,frame.as_ref(),pv,focused,&plot.sheets,&plot.sheet_refs,None,false,None,Some(&plot.retrying),pv.last_retry)
+                    &picture,frame,pv,focused,&plot.sheets,&plot.sheet_refs,None,false,None,Some(&plot.retrying),pv.last_retry)
             } else { panestate::view(light,&PaneState::loading(panestate::loading_for(kind,kind == "gerbers")),None) }
         } else if let Some(page) = super::tile_pages::body_with_panel(&app.screens, thread, row, light, cx,
             if focused && kind == "review" { review_panel.take() } else { None }) {

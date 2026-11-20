@@ -317,7 +317,11 @@ impl Backplane {
                 page
             });
             self.subscribe_solid(&page, slot, cx);
-            cx.observe(&page, |_, _, cx| cx.notify()).detach();
+            cx.observe(&page, move |this, observed, cx| {
+                if this.screens.tile_pages.get(&slot).is_some_and(|(_, page)| page == &observed) {
+                    this.screens.parts.notify(Backplane::viewer_part, cx);
+                }
+            }).detach();
             self.screens.tile_pages.insert(slot, (key, page));
         }
     }
