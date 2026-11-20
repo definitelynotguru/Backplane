@@ -27,7 +27,7 @@ pub fn chain_of(raw: Option<&str>) -> Vec<Target> { parse(raw.unwrap_or(DEFAULT_
 /// The order is followed unless the person turned it off (`fallback.on` = off).
 pub fn chain_on(raw: Option<&str>) -> bool { raw != Some("off") }
 /// A display name for a provider id.
-pub fn provider_name(p: &str) -> String { match p { "claude" => "Claude".into(), "codex" => "Codex".into(), "antigravity" => "Antigravity".into(), "grok" => "Grok".into(), "muse" => "Muse".into(), "opencode" => "OpenCode".into(), "pi" => "Pi".into(), "omp" => "Oh My Pi".into(), x => x.into() } }
+pub fn provider_name(p: &str) -> String { match p { "claude" => "Claude".into(), "codex" => "Codex".into(), "antigravity" => "Antigravity".into(), "grok" => "Grok".into(), "muse" => "Muse".into(), "opencode" => "OpenCode".into(), "pi" => "Pi".into(), "omp" => "Oh My Pi".into(), "devin" => "Devin".into(), x => x.into() } }
 pub fn has(xs: &[Target], key: &str) -> bool { xs.iter().any(|t| t.key() == key) }
 
 /// Caps.valid: the provider lists models and the target names one of them (or none).

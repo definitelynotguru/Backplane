@@ -23,6 +23,7 @@ pub const PROVIDERS: &[Provider] = &[
     Provider { id: "opencode", title: "OpenCode", login: &["auth", "login"], hint: "" },
     Provider { id: "pi", title: "Pi", login: &[], hint: "Type /login, then follow it." },
     Provider { id: "omp", title: "Oh My Pi", login: &[], hint: "Type /login, then follow it." },
+    Provider { id: "devin", title: "Devin", login: &["auth", "login", "--force-manual-token-flow"], hint: "Open the link, sign in, then paste the code the page shows." },
 ];
 pub fn provider(id: &str) -> Option<&'static Provider> { PROVIDERS.iter().find(|p| p.id == id) }
 /// The keys a press sends, by name.
@@ -149,9 +150,9 @@ async fn run(cmd: &std::path::Path, args: &[&str]) -> Option<(i32, String, Strin
     Some((out.status.code().unwrap_or(-1), String::from_utf8_lossy(&out.stdout).into_owned(), String::from_utf8_lossy(&out.stderr).into_owned()))
 }
 /// One provider here: where its CLI is, its version, whether it is signed in and as whom (Claude and Codex say; the others cannot be asked).
-async fn check_one(cli: &crate::agents::proc::Cli, p: &Provider) -> Value {
+async fn check_one(home: &std::path::Path, cli: &crate::agents::proc::Cli, p: &Provider) -> Value {
     use super::onboard::{claude_signed, codex_signed, version_of};
-    let Ok(path) = cli.resolve(p.id) else { return json!({"id": p.id, "path": ""}) };
+    let Some(path) = crate::agents::providers::acp_registry::locate(home, cli, p.id) else { return json!({"id": p.id, "path": ""}) };
     let version = run(&path, &["--version"]).await.filter(|r| r.0 == 0).map_or(String::new(), |r| version_of(&r.1));
     let (signed, who) = match p.id {
         "claude" => run(&path, &["auth", "status"]).await.map_or(("unknown", String::new()), |r| claude_signed(r.0, &r.1)),
@@ -164,7 +165,7 @@ async fn checks(hub: &Arc<Hub>, fresh: bool) -> Value {
     let now = now_ms();
     if !fresh { if let Some(v) = CHECKED.lock().unwrap().iter().find(|(h, at, _)| *h == hub.cfg.home && now < at + CHECK_FOR_MS).map(|x| x.2.clone()) { return v } }
     let cli = crate::agents::proc::Cli::from_env();
-    let v = Value::Array(futures_util::future::join_all(PROVIDERS.iter().map(|p| check_one(&cli, p))).await);
+    let v = Value::Array(futures_util::future::join_all(PROVIDERS.iter().map(|p| check_one(&hub.cfg.home, &cli, p))).await);
     let mut g = CHECKED.lock().unwrap(); g.retain(|(h, _, _)| *h != hub.cfg.home); g.push((hub.cfg.home.clone(), now, v.clone()));
     v
 }
@@ -202,7 +203,7 @@ async fn act_here(hub: &Arc<Hub>, prov: &str, action: &str, text: &str) -> Resul
         "start" | "shell" => {
             let t = terms()?;
             let (prog, args): (String, Vec<String>) = if action == "shell" { (String::new(), vec![]) } else {
-                let path = crate::agents::proc::Cli::from_env().resolve(p.id).map_err(|_| format!("{} is not installed there", p.title))?;
+                let path = crate::agents::providers::acp_registry::locate_or_fetch(&hub.cfg.home, &crate::agents::proc::Cli::from_env(), p.id).await.map_err(|_| format!("{} is not installed there", p.title))?;
                 (path.to_string_lossy().into_owned(), p.login.iter().map(|a| a.to_string()).collect())
             };
             let cwd = hub.cfg.home.to_string_lossy().into_owned();

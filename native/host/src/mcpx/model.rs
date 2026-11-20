@@ -52,7 +52,7 @@ pub struct Server {
 pub const RESERVED: [&str; 2] = ["backplane", "pcbparts"];
 pub const TRANSPORTS: [&str; 3] = ["stdio", "http", "sse"];
 /// The providers a scope can name (agents/providers): every one Backplane runs.
-pub const PROVIDERS: [&str; 9] = ["claude", "codex", "antigravity", "grok", "opencode", "muse", "pi", "omp", "agy"];
+pub const PROVIDERS: [&str; 10] = ["claude", "codex", "antigravity", "grok", "opencode", "muse", "pi", "omp", "agy", "devin"];
 
 pub fn valid_id(id: &str) -> bool { !id.is_empty() && id.len() <= 40 && id.bytes().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-' || b == b'_') && !RESERVED.contains(&id) }
 /// A name made into an id: lower case, other characters as '-', trimmed; "server" when nothing is left.

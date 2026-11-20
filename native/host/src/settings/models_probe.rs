@@ -137,6 +137,15 @@ pub fn version_line(out: &str) -> String { out.lines().map(str::trim).find(|l| !
 pub struct Found {
     pub claude: Option<(String, Vec<Value>)>, pub codex: Option<(String, String)>, pub grok: Option<(String, String)>, pub muse: Option<(String, Vec<Value>)>,
     pub opencode: Option<(String, String)>, pub pi: Option<(String, Vec<(String, bool)>)>, pub omp: Option<(String, Vec<Value>)>, pub agy: agy::Info,
+    /** `devin models list` */ pub devin: Option<(String, String)>,
+}
+/// `devin models list`: each model row (indented, under its family's heading) as its id and its name, in its order.
+pub fn devin_models(out: &str) -> Vec<(String, String)> {
+    out.lines().filter(|l| l.starts_with("  ")).filter_map(|l| {
+        let l = l.trim(); let (id, rest) = l.split_once(char::is_whitespace).unwrap_or((l, ""));
+        let ok = !id.is_empty() && id.bytes().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b"-._".contains(&b));
+        ok.then(|| (id.to_string(), rest.split(" [").next().unwrap_or("").trim().to_string()))
+    }).collect()
 }
 /// Models.found: the `models` info (a JSON text) from what was found: None is an agent that is not installed.
 pub fn info_of(f: &Found) -> String {
@@ -149,8 +158,9 @@ pub fn info_of(f: &Found) -> String {
     let (oc, oca) = match &f.opencode { Some((v, o)) => (opencode::models(o), opencode::about(v, o)), None => (vec![], opencode::about("", "")) };
     let (pi, pia) = match &f.pi { Some((v, rows)) => (rows.iter().map(|r| r.0.clone()).collect(), pi_about(v, rows)), None => (vec![], none("pi")) };
     let (om, oma) = match &f.omp { Some((v, xs)) => (xs.iter().map(|o| gs(o, "selector").to_string()).filter(|s| !s.is_empty()).collect(), omp_about(v, xs)), None => (vec![], none("omp")) };
-    let mut info = json!({"claude": cl, "codex": cx, "grok": gk, "muse": ms, "antigravity": agy::info_models(&f.agy), "opencode": oc, "pi": pi, "omp": om, "agy": agy::info_json(&f.agy), "probed": true,
-        "about": {"claude": cla, "codex": cxa, "grok": gka, "muse": msa, "antigravity": agy::info_about(&f.agy), "opencode": oca, "pi": pia, "omp": oma}});
+    let (dv, dva) = match &f.devin { Some((v, o)) => { let ms = devin_models(o); let mut labels = base["devin"]["labels"].clone(); for (id, name) in &ms { if !name.is_empty() { labels[id] = json!(name) } } (ms.into_iter().map(|m| m.0).collect::<Vec<_>>(), json!({"cli": v, "labels": labels})) }, None => (vec![], none("devin")) };
+    let mut info = json!({"claude": cl, "codex": cx, "grok": gk, "muse": ms, "antigravity": agy::info_models(&f.agy), "opencode": oc, "pi": pi, "omp": om, "devin": dv, "agy": agy::info_json(&f.agy), "probed": true,
+        "about": {"claude": cla, "codex": cxa, "grok": gka, "muse": msa, "antigravity": agy::info_about(&f.agy), "opencode": oca, "pi": pia, "omp": oma, "devin": dva}});
     super::agent_versions::mark(&mut info); // each found CLI's version against the supported ones
     info.to_string()
 }
@@ -212,7 +222,7 @@ fn codex_cache_path() -> PathBuf {
 /// Models.detect: every agent at once; one that is not installed (or blocked: a stand-in folder without it) is None.
 pub async fn detect(home: &Path) -> Found {
     let cli = crate::agents::proc::Cli::from_env();
-    let at = |n: &str| cli.resolve(n).ok();
+    let at = |n: &str| crate::agents::providers::acp_registry::locate(home, &cli, n);
     let claude = async { let p = at("claude")?; let v = version(&p).await;
         let out = ask(&p, &["-p", "--input-format", "stream-json", "--output-format", "stream-json", "--verbose"], &[r#"{"type":"control_request","request_id":"models","request":{"subtype":"initialize"}}"#],
             |l| l.contains("\"control_response\""), Duration::from_secs(30)).await;
@@ -235,6 +245,7 @@ pub async fn detect(home: &Path) -> Found {
         Some((v, out)) };
     let pi = async { let p = at("pi")?; let v = version(&p).await; let o = run(&p, &["--list-models"], &[("PI_OFFLINE", "1")], Duration::from_secs(30)).await.map_or(String::new(), |r| r.1); Some((v, pi_rows(&o))) };
     let omp = async { let p = at("omp")?; let v = version(&p).await; let o = run(&p, &["models", "--json"], &[], Duration::from_secs(30)).await.map_or(String::new(), |r| r.1); Some((v, omp_list(&o))) };
+    let devin = async { let p = at("devin")?; let v = version(&p).await; let o = run(&p, &["models", "list"], &[], Duration::from_secs(30)).await.filter(|r| r.0 == 0).map_or(String::new(), |r| r.1); Some((v, o)) };
     let ag = async {
         let root = agy::root(&home.to_string_lossy());
         let mut c = proc::tokio_cmd(Kind::Local, "sh"); c.arg("-c").arg(agy::probe_sh()).arg("sh").arg(&root).stdin(std::process::Stdio::null()).kill_on_drop(true);
@@ -246,8 +257,8 @@ pub async fn detect(home: &Path) -> Found {
             // the driver maps a thread's model and effort to agy's variant id from this list (kept only when agy listed something)
             if !i.cli_models.is_empty() { let _ = std::fs::create_dir_all(&root); let _ = std::fs::write(agy::bases_path(&home.to_string_lossy()), agy::bases_json(&agy::fold(&i.cli_models))); } } }
         i };
-    let (claude, codex, grok, muse, opencode, pi, omp, agy) = tokio::join!(claude, codex, grok, muse, oc, pi, omp, ag);
-    Found { claude, codex, grok, muse, opencode, pi, omp, agy }
+    let (claude, codex, grok, muse, opencode, pi, omp, agy, devin) = tokio::join!(claude, codex, grok, muse, oc, pi, omp, ag, devin);
+    Found { claude, codex, grok, muse, opencode, pi, omp, agy, devin }
 }
 
 /// One detection: a list that differs from the one in force is cached, pushed to every client and every view is drawn again. Answers whether it changed.
@@ -349,5 +360,9 @@ mod tests {
         let f = Found { codex: Some(("codex 1".into(), r#"{"models":[{"slug":"g","visibility":"list"}]}"#.into())), claude: Some(("c 2".into(), claude_listed(CLAUDE))), ..Default::default() };
         let v: Value = serde_json::from_str(&info_of(&f)).unwrap(); assert_eq!(v["codex"], json!(["g"])); assert_eq!(v["about"]["codex"]["cli"], "codex 1"); assert_eq!(v["claude"][0], "opus");
         let i = info_of(&f); assert_eq!(cache_read(&cache_text(&i)).as_deref(), Some(i.as_str())); assert_eq!(cache_read("{}\n"), None); assert_eq!(cache_read(""), None);
+    }
+    #[test] fn devins_model_rows_are_its_models_and_their_names() {
+        let out = "Available models (2 families)\n\nAdaptive (adaptive)\n  adaptive        Adaptive  [$0.5 / 1M Input]\n\nSWE-2 (swe-2)\n  aliases: swe\n  swe-2-high      SWE-2 High  [262K context, Free]\n";
+        assert_eq!(devin_models(out), vec![("adaptive".to_string(), "Adaptive".to_string()), ("swe-2-high".to_string(), "SWE-2 High".to_string())]);
     }
 }

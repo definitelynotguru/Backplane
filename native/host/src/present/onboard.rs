@@ -103,6 +103,7 @@ pub const AGENTS: &[Agent] = &[
     Agent { id: "opencode", name: "OpenCode", install: &[], guide: "https://opencode.ai", sign_in: "opencode auth login" },
     Agent { id: "pi", name: "Pi", install: &[], guide: "https://pi.dev", sign_in: "pi, then /login" },
     Agent { id: "omp", name: "Oh My Pi", install: &[], guide: "https://github.com/can1357/oh-my-pi", sign_in: "omp, then /login" },
+    Agent { id: "devin", name: "Devin", install: &[], guide: "https://docs.devin.ai/cli", sign_in: "devin auth login" },
 ];
 fn install_cmd<'a>(a: &'a Agent, os: &str) -> &'a str { a.install.iter().find(|(p, _)| *p == os).map_or("", |(_, c)| *c) }
 

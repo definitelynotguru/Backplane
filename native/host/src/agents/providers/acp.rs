@@ -7,7 +7,8 @@ use serde_json::{json, Map, Value};
 /// AcpTurn: what a turn needs.
 #[derive(Clone, Debug, Default)]
 pub struct AcpTurn { pub cwd: String, pub mcp: String, pub prompt: String, pub text: String, pub session: String, pub ask: bool, /** the full mcpServers (mcpx gen::acp); null: Backplane's own only */ pub servers: Value,
-    /** the thread's model, set on the session before the prompt ("": the agent's own); grok's only, opencode sets its own */ pub model: String }
+    /** the thread's model, set on the session before the prompt ("": the agent's own); grok's only, opencode sets its own */ pub model: String,
+    /** the agent's command, what a failure names and how it signs in ("": grok) */ pub agent: String }
 impl AcpTurn { pub fn servers(&self) -> Value { if self.servers.is_array() { self.servers.clone() } else { mcp(&self.mcp) } } }
 
 /// Acp: the session id once known, the reply text so far, whether the turn ended, and the tool calls already logged ("\n<id>\n" each).
@@ -44,10 +45,15 @@ pub fn say(fresh: bool, t: &AcpTurn, sid: &str) -> String {
 }
 pub fn failed(msg: &str) -> Value { event("turn.failed", json!({"message":msg})) }
 /// Acp.hint: a sign-in problem says how to fix it.
-pub fn hint(msg: &str) -> String { let l = msg.to_lowercase(); if l.contains("auth") || l.contains("login") { format!("{msg} (sign in once with `grok login`)") } else { msg.into() } }
+pub fn hint(msg: &str, login: &str) -> String { let l = msg.to_lowercase(); if l.contains("auth") || l.contains("login") { format!("{msg} (sign in once with `{login}`)") } else { msg.into() } }
+impl AcpTurn {
+    pub fn who(&self) -> &str { if self.agent.is_empty() { "grok" } else { &self.agent } }
+    /// how the agent signs in: grok's `grok login`, Devin's `devin auth login`
+    pub fn login(&self) -> String { if self.who() == "devin" { "devin auth login".into() } else { format!("{} login", self.who()) } }
+}
 /// Acp.error
 pub fn error(o: &Value, default: &str) -> String { o.get("error").and_then(|e| e.get("message")).and_then(Value::as_str).unwrap_or(default).to_string() }
-pub fn fail(a: &mut Acp, msg: &str) -> Out { a.done = true; Out { send: vec![], shapes: vec![failed(&hint(msg))] } }
+pub fn fail(a: &mut Acp, t: &AcpTurn, msg: &str) -> Out { a.done = true; Out { send: vec![], shapes: vec![failed(&hint(msg, &t.login()))] } }
 
 /// Acp.finished: the reply, then the turn's end.
 pub fn finished(a: &mut Acp) -> Vec<Value> {
@@ -164,7 +170,7 @@ pub fn request(a: &mut Acp, t: &AcpTurn, o: &Value) -> Out {
 /// Acp.reply.k: the answer to one of our requests.
 fn reply(a: &mut Acp, t: &AcpTurn, o: &Value) -> Out {
     let ok = o.get("error").map_or(true, Value::is_null);
-    if !ok { if nat_id(o) == 5 { return fail(a, &format!("grok could not switch this session to {}: {}", t.model, error(o, "refused"))) } return fail(a, &error(o, "grok failed")) }
+    if !ok { if nat_id(o) == 5 { return fail(a, t, &format!("{} could not switch this session to {}: {}", t.who(), t.model, error(o, "refused"))) } return fail(a, t, &error(o, &format!("{} failed", t.who()))) }
     match nat_id(o) {
         1 => Out { send: vec![open(t)], shapes: vec![] },
         2 => { let sid = o.get("result").and_then(|r| r.get("sessionId")).and_then(Value::as_str).unwrap_or(&t.session).to_string(); opened(a, t, &sid) }
@@ -182,8 +188,8 @@ pub fn line(a: &mut Acp, t: &AcpTurn, o: &Value) -> Out {
 #[cfg(test)]
 mod tests {
     use super::*;
-    fn t(sid: &str) -> AcpTurn { AcpTurn { cwd: "/tmp/p".into(), mcp: "http://127.0.0.1:1/mcp/t?token=x".into(), prompt: "RULES".into(), text: "hello".into(), session: sid.into(), ask: false, servers: Value::Null, model: String::new() } }
-    fn ta(sid: &str) -> AcpTurn { AcpTurn { ask: true, ..t(sid) } }
+    fn t(sid: &str) -> AcpTurn { AcpTurn { agent: String::new(), cwd: "/tmp/p".into(), mcp: "http://127.0.0.1:1/mcp/t?token=x".into(), prompt: "RULES".into(), text: "hello".into(), session: sid.into(), ask: false, servers: Value::Null, model: String::new() } }
+    fn ta(sid: &str) -> AcpTurn { AcpTurn { agent: String::new(), ask: true, ..t(sid) } }
     fn ln(a: &mut Acp, t: &AcpTurn, l: &str) -> Out { line(a, t, &serde_json::from_str(l).unwrap()) }
     fn outs(o: &Out) -> String { o.send.iter().cloned().chain(o.shapes.iter().map(|v| v.to_string())).collect::<Vec<_>>().join(" | ") }
     fn method(l: &str) -> String { serde_json::from_str::<Value>(l).ok().map(|v| s(&v, "method").to_string()).unwrap_or_default() }
@@ -388,7 +394,7 @@ mod e2e {
     }
     // grok 1.0.77 (2026-11-15): `-m grok-4.6` ran grok-4.7, on a new session as on a loaded one; session/set_model is what moves it
     #[test] fn the_threads_model_is_set_on_the_session_before_the_prompt() {
-        let t = |sid: &str| AcpTurn { cwd: "/tmp/p".into(), text: "hello".into(), session: sid.into(), ..AcpTurn::default() }; let tt = AcpTurn { model: "grok-4.5".into(), ..t("OLD") }; let mut a = Acp::new();
+        let t = |sid: &str| AcpTurn { agent: String::new(), cwd: "/tmp/p".into(), text: "hello".into(), session: sid.into(), ..AcpTurn::default() }; let tt = AcpTurn { agent: String::new(), model: "grok-4.5".into(), ..t("OLD") }; let mut a = Acp::new();
         let o = reply(&mut a, &tt, &serde_json::from_str(r#"{"jsonrpc":"2.0","id":2,"result":{"sessionId":"OLD"}}"#).unwrap());
         assert_eq!(o.send.len(), 1); assert_eq!(serde_json::from_str::<Value>(&o.send[0]).unwrap(), json!({"jsonrpc":"2.0","id":5,"method":"session/set_model","params":{"sessionId":"OLD","modelId":"grok-4.5"}}));
         let p = reply(&mut a, &tt, &serde_json::from_str(r#"{"jsonrpc":"2.0","id":5,"result":{"_meta":{"model":{"Ok":"grok-4.5"}}}}"#).unwrap());

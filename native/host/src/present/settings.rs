@@ -197,7 +197,7 @@ fn licenses_dir() -> Option<std::path::PathBuf> {
     let d = me.parent()?.join("licenses"); d.join("README.md").is_file().then_some(d)
 }
 
-const PROVIDERS: &[&str] = &["claude", "codex", "grok", "muse", "antigravity", "opencode", "pi", "omp"];
+const PROVIDERS: &[&str] = &["claude", "codex", "grok", "muse", "antigravity", "opencode", "pi", "omp", "devin"];
 /// Settings > Agents, as far as the hub knows it: the default provider and model for new threads and thinking. Provider install and sign-in, the fallback hierarchy and Antigravity's account are not on this page yet.
 fn agents(st: &State, info: &Value) -> Vec<Value> {
     let models: Value = info["models"].as_str().and_then(|s| serde_json::from_str(s).ok()).unwrap_or(Value::Null);

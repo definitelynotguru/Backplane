@@ -100,6 +100,14 @@ impl Cx {
                 }
             }
             "item.started" | "item.updated" => { let it = o.get("item").unwrap_or(&Value::Null); if s(it, "type") == "todo_list" { out.push(json!({"$":"TodosChanged","thread":th,"who":"agent","data":todo_data(it),"at":at})) } }
+            // a subagent (Devin's, providers/devin.rs): its row in the timeline as Claude's Agent call's, its steps and answer in its log (bg::log, as lines.rs's Sub.*)
+            "subagent.started" => { let id = s(o, "id"); let log = super::bg::log(&th);
+                out.push(json!({"$":"ActivityLogged","thread":th,"act":id,"tone":"tool","kind":"Agent","summary":s(o, "title"),"at":at}));
+                out.push(json!({"$":"ActivityLogged","thread":log,"act":format!("{id}/about"),"tone":id,"kind":"about","summary":json!({"type":"","model":s(o, "model"),"prompt":s(o, "prompt"),"description":s(o, "title")}).to_string(),"at":at})) }
+            "subagent.item" => { let (id, item) = (s(o, "id"), s(o, "item")); self.seq += 1; let item = if item.is_empty() { format!("say-{}", self.seq) } else { item.to_string() };
+                out.push(json!({"$":"ActivityLogged","thread":super::bg::log(&th),"act":format!("{id}/{item}"),"tone":id,"kind":s(o, "kind"),"summary":s(o, "text"),"at":at})) }
+            "subagent.done" => { let id = s(o, "id");
+                out.push(json!({"$":"ActivityLogged","thread":super::bg::log(&th),"act":format!("{id}/reply"),"tone":id,"kind":"reply","summary":json!({"text":s(o, "text"),"error":o.get("error").and_then(Value::as_bool).unwrap_or(false)}).to_string(),"at":at})) }
             "turn.completed" => { out.push(json!({"$":"TurnChanged","thread":th,"state":"completed","at":at})); self.codex_usage(o, provider, model, at, out); fx.delta_end = true }
             "turn.failed" => {
                 let m = o.get("error").and_then(|e| e.get("message")).and_then(Value::as_str).or_else(|| o.get("message").and_then(Value::as_str)).unwrap_or("turn failed");

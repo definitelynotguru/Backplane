@@ -13,6 +13,7 @@ Backplane runs each agent through its vendor's own CLI. The hub keeps one table 
 | OpenCode | `opencode` | 2.3.0 | 2.3.0 | `opencode upgrade` |
 | Pi | `pi` | 1.4.0 | 1.4.0 | `pi update --self` |
 | Oh My Pi | `omp` | 18.18.8 | 18.18.8 | `omp update` |
+| Devin | `devin acp`, fetched from the [ACP registry](https://cdn.agentclientprotocol.com/registry/v1/latest/registry.json) | 3000.14.30821 | 3000.14.30821 | none: each turn starts the registry's current version, fetched once into `<home>/acp-registry/devin/<version>/` |
 
 - **Minimum:** the oldest version Backplane supports. Claude Code 2.1.268 is a hard floor: it is the first version that reports its
   isolated account directory, which Backplane's accounts need. For the others, the minimum is the oldest version Backplane has been run against.

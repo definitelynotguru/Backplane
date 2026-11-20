@@ -41,7 +41,7 @@ fn tracked(k: &str) -> bool { KEYS.iter().any(|p| k == *p || (p.ends_with('.') &
 pub const CARRY_TEXT: &str = "Backplane restarted while you were working. Continue where you left off.";
 
 /// The providers a message can pick up where a cut turn stopped: each resumes its own session by id (a process per turn), Claude with `--resume`.
-pub const CARRIES: [&str; 8] = ["claude", "codex", "grok", "muse", "antigravity", "opencode", "pi", "omp"];
+pub const CARRIES: [&str; 9] = ["claude", "codex", "grok", "muse", "antigravity", "opencode", "pi", "omp", "devin"];
 /// A thread that may go on: the setting is on, it is live, has made progress since the last carry, and its agent can resume. One of the process-per-turn providers
 /// needs a session to resume: with none the turn was cut before it began, and the note "continue where you left off" would reach an agent that knows nothing of it.
 pub fn carry_may(t: &T, restart_continue: &str) -> bool {

@@ -7,7 +7,7 @@ use serde_json::{json, Value};
 pub struct Out { pub patch: Value, pub cmds: Vec<Value> }
 /// What the new-bot form says under a name the hub would not take (Bot.name.valid, `bots::rpc::name_ok`).
 pub const NAME_RULE: &str = "A bot's name is 1 to 24 letters, digits, - or _, with no spaces.";
-const PROVIDERS: &[&str] = &["claude", "codex", "grok", "muse", "antigravity", "opencode", "pi", "omp"];
+const PROVIDERS: &[&str] = &["claude", "codex", "grok", "muse", "antigravity", "opencode", "pi", "omp", "devin"];
 fn s<'a>(v: &'a Value, k: &str) -> &'a str { v[k].as_str().unwrap_or("") }
 fn draft<'a>(session: &'a Value, k: &str) -> &'a str { s(&session["drafts"], k) }
 fn raw(id: &str) -> &str { id.rsplit('|').next().unwrap_or(id) }

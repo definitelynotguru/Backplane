@@ -36,13 +36,16 @@ async fn open(t: &Arc<Terms>, hub: &Arc<Hub>, thread: &str, a: &Value) -> (bool,
     if cmd.len() > 65536 { return fail("command is too long") }
     if t.running_of(thread).await.len() >= super::MAX_PER_THREAD { return fail("too many terminals are open in this chat: close one first") }
     let (cols, rows) = (emb::cols(n(a, "cols").min(100000) as u32), emb::rows(n(a, "rows").min(100000) as u32));
-    let title = emb::title_of(sv(a, "title"), cmd);
-    let now = now_s(); let id = format!("x{now}-{}", hub.store.len() as u64 + SEQ.fetch_add(1, Ordering::Relaxed));
-    let ev = json!({"$":"ActivityLogged","thread":thread,"act":id,"tone":emb::TONE,"kind":emb::KIND,"summary":emb::summary(&title, cols, rows, cmd),"at":now});
-    if hub.commit(&ev).await.is_err() { return fail("could not write the terminal's entry") }
     let cwd = t.cwd(thread).await;
-    t.run(&emb::key(thread, &id), &title, &cwd, cmd, cols, rows, false).await;
-    (true, json!({"id":id,"cols":cols,"rows":rows,"state":"running"}))
+    match start(t, hub, thread, &emb::title_of(sv(a, "title"), cmd), cmd, &cwd, cols, rows).await { Ok(id) => (true, json!({"id":id,"cols":cols,"rows":rows,"state":"running"})), Err(e) => fail(&e) }
+}
+/// A command in a new chat terminal of `thread`: its entry in the chat, then the command in `cwd`. Ok: the terminal's id.
+pub async fn start(t: &Arc<Terms>, hub: &Arc<Hub>, thread: &str, title: &str, cmd: &str, cwd: &str, cols: u32, rows: u32) -> Result<String, String> {
+    let now = now_s(); let id = format!("x{now}-{}", hub.store.len() as u64 + SEQ.fetch_add(1, Ordering::Relaxed));
+    let ev = json!({"$":"ActivityLogged","thread":thread,"act":id,"tone":emb::TONE,"kind":emb::KIND,"summary":emb::summary(title, cols, rows, cmd),"at":now});
+    if hub.commit(&ev).await.is_err() { return Err("could not write the terminal's entry".into()) }
+    t.run(&emb::key(thread, &id), title, cwd, cmd, cols, rows, false).await;
+    Ok(id)
 }
 
 /// The actor's answer again every 250 ms while the program runs and waitMs lasts (at most 120 s).

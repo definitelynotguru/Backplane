@@ -55,7 +55,7 @@ pub fn mark_path(provider: &str) -> Option<&'static [Seg]> {
         let i = names.iter().position(|n| *n == provider)?;
         Some(CELLS[i].get_or_init(|| parse_d(attr(svgs[i], "<path", "d").unwrap_or(""))).as_slice())
     }}; (@n $($name:literal),*) => { [$($name),*].len() } }
-    marks!("claude", "codex", "grok", "muse", "antigravity", "opencode", "pi", "omp")
+    marks!("claude", "codex", "grok", "muse", "antigravity", "opencode", "pi", "omp", "devin")
 }
 /// The mark drawn plain in `color` in a `size` px box (one paint, no repaint loop).
 pub fn mark(segs: &'static [Seg], size: f32, color: u32) -> impl IntoElement {

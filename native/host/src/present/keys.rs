@@ -281,7 +281,7 @@ pub fn with_catalog(info: &Value, provider: &str, cat: &[Value]) -> Value {
     out
 }
 /// The agents the picker offers, in its order, with what each is (dim beside its name: 0.14's ModelPick.product).
-pub const AGENTS: &[(&str, &str)] = &[("claude", "Claude Code"), ("codex", "Codex CLI"), ("grok", "Grok CLI"), ("muse", "Muse Code"), ("antigravity", "Google"), ("opencode", "OpenCode"), ("pi", "Pi"), ("omp", "Oh My Pi")];
+pub const AGENTS: &[(&str, &str)] = &[("claude", "Claude Code"), ("codex", "Codex CLI"), ("grok", "Grok CLI"), ("muse", "Muse Code"), ("antigravity", "Google"), ("opencode", "OpenCode"), ("pi", "Pi"), ("omp", "Oh My Pi"), ("devin", "Devin")];
 /// Effort.chips.about: the levels `model` of `provider` takes, its default ("") first: those its CLI says that model takes (Claude, Codex, Pi and Oh My Pi
 /// report them per model), kept to the levels Backplane passes on for the provider; none when it takes none.
 pub fn model_efforts(models: Option<&Value>, provider: &str, model: &str) -> Vec<&'static str> {

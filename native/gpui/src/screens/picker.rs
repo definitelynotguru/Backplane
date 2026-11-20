@@ -261,7 +261,7 @@ pub fn shown(thread: &Value, pick: &Pick, favs: &[String]) -> Option<Shown> {
 /// A provider's colour and fallback initial: a square of its colour with its initial. (The hub sends no artwork; these stand in.)
 pub fn mark(provider: &str) -> (u32, &'static str) {
     match provider { "claude" => (0xd97757, "A"), "codex" => (0x10a37f, "O"), "grok" => (0x6b7280, "X"), "muse" => (0x8b5cf6, "M"), "opencode" => (0x2563eb, "C"),
-        "pi" => (0xdb2777, "π"), "omp" => (0xc026d3, "Ω"), "antigravity" | "agy" => (0x4285f4, "G"), _ => (0x64748b, "?") }
+        "pi" => (0xdb2777, "π"), "omp" => (0xc026d3, "Ω"), "devin" => (0x0f766e, "D"), "antigravity" | "agy" => (0x4285f4, "G"), _ => (0x64748b, "?") }
 }
 pub fn logo(provider: &str) -> AnyElement {
     let provider = match bare(provider) { "agy" => "antigravity", p => p };
@@ -714,9 +714,9 @@ mod tests {
         let (top, h) = thumb(300., 300., 300., 300.).unwrap(); assert_eq!(top + h, 300.);
         assert!(thumb(300., 300., 1_000_000., 0.).unwrap().1 >= 24.);
     }
-    #[test] fn every_built_in_agent_has_a_vector_mark_and_an_unknown_one_keeps_the_square() { for p in ["claude", "codex", "grok", "muse", "antigravity", "opencode", "pi", "omp"] { assert!(crate::art::mark_path(p).map_or(false, |s| s.len() > 3), "{p}"); } for p in ["mystery", "", "agy"] { assert!(crate::art::mark_path(p).is_none(), "{p}"); } assert_eq!(mark("mystery").1, "?"); }
+    #[test] fn every_built_in_agent_has_a_vector_mark_and_an_unknown_one_keeps_the_square() { for p in ["claude", "codex", "grok", "muse", "antigravity", "opencode", "pi", "omp", "devin"] { assert!(crate::art::mark_path(p).map_or(false, |s| s.len() > 3), "{p}"); } for p in ["mystery", "", "agy"] { assert!(crate::art::mark_path(p).is_none(), "{p}"); } assert_eq!(mark("mystery").1, "?"); }
     #[test] fn paths_parse_relative_and_absolute() { use crate::art::{parse_d, Seg}; let s = parse_d("M22 24H2V0h20zM17 4.8H7v14.4h10z"); assert_eq!(s.len(), 10); assert!(matches!(s[3], Seg::L(x, y) if x == 22. && y == 0.)); assert!(matches!(s[8], Seg::L(x, y) if x == 17. && (y - 19.2).abs() < 1e-4)); }
-    #[test] fn every_provider_has_a_mark() { for p in ["claude", "codex", "grok", "muse", "opencode", "pi", "omp", "antigravity", "mystery"] { assert!(!mark(p).1.is_empty()); } }
+    #[test] fn every_provider_has_a_mark() { for p in ["claude", "codex", "grok", "muse", "opencode", "pi", "omp", "devin", "antigravity", "mystery"] { assert!(!mark(p).1.is_empty()); } }
     #[test] fn the_speed_dial_turns_by_keys_and_presses_and_applies_only_what_the_model_takes() {
         let picker = serde_json::json!({"provider": "claude",
             "providers": [{"label": "claude", "value": "@claude", "on": true, "ok": true}],

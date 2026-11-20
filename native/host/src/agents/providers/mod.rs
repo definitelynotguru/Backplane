@@ -12,7 +12,7 @@
 //! A driver is a small state machine for ONE turn: it names the command line, writes its handshake, and turns the process's own protocol
 //! (ACP / MSP / RPC JSON lines) into shapes and replies. It is built fresh per turn (`driver()`), so it keeps whatever it needs in itself.
 use serde_json::Value;
-pub mod acp; pub mod agy; pub mod agy_cli; pub mod codex; pub mod dialog; pub mod grok; pub mod msp; pub mod muse; pub mod omp; pub mod opencode; pub mod pi;
+pub mod acp; pub mod acp_registry; pub mod agy; pub mod agy_cli; pub mod codex; pub mod devin; pub mod dialog; pub mod grok; pub mod msp; pub mod muse; pub mod omp; pub mod opencode; pub mod pi;
 
 /// Everything about the turn a driver may read. `text` is the message with `$skill` mentions made real; `images` its image attachments' paths;
 /// `prompt` the runtime prompt (Hub.prompt ++ skills); `mcp_url` this process's Backplane MCP endpoint; `home` the hub's home;
@@ -79,6 +79,8 @@ pub trait Driver: Send {
     /// The process reads nothing after its start lines: its stdin is closed once they are written. Codex: `codex exec` (0.167) reads a piped
     /// stdin to its end as more prompt ("Reading additional input from stdin..."), so an open pipe kept every Codex turn waiting forever.
     fn closes_stdin(&self) -> bool { false }
+    /// The ACP Registry agent this driver runs (acp_registry.rs): outside test mode the actor starts that agent's fetched program with the registry's arguments, not `cli` on PATH.
+    fn registry(&self) -> Option<&'static str> { None }
 }
 
 /// A driver and the CLI it runs (resolved through `Cli`: in test mode only the stand-in folder).
@@ -88,7 +90,7 @@ pub struct Made { pub cli: &'static str, pub driver: Box<dyn Driver> }
 pub fn driver(provider: &str) -> Option<Made> {
     #[cfg(test)] { if provider == "testprov" { return Some(Made { cli: "testcli", driver: Box::new(test_driver::Td) }) } }
     codex::driver(provider).or_else(|| grok::driver(provider)).or_else(|| opencode::driver(provider)).or_else(|| muse::driver(provider))
-        .or_else(|| agy::driver(provider)).or_else(|| pi::driver(provider)).or_else(|| omp::driver(provider))
+        .or_else(|| agy::driver(provider)).or_else(|| pi::driver(provider)).or_else(|| omp::driver(provider)).or_else(|| devin::driver(provider))
 }
 
 /// A test-only provider: asks once, writes the person's answer back, ends with its turn (the seams a lane's driver uses).

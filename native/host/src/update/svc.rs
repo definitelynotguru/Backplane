@@ -37,7 +37,7 @@ pub(crate) fn curl(url: &str, out: &Path, max: u64) -> Result<(), String> {
 /// Listed and checked (`run::members_ok`) before anything is written, then unpacked owning nothing but what this hub owns.
 /// A zip (a Windows build, `run::stage` names it `archive.zip`) goes through Windows' own `tar.exe`, bsdtar, which reads zip and lists it the same way;
 /// Git's GNU tar, often first on PATH there, reads no zip.
-fn tar(a: &Path, d: &Path) -> Result<(), String> {
+pub(crate) fn tar(a: &Path, d: &Path) -> Result<(), String> {
     let zip = a.extension().is_some_and(|e| e == "zip");
     let prog = tar_program(zip); let z = if zip { "" } else { "z" };
     let list = |flag: &str| -> Result<String, String> {

@@ -6,6 +6,7 @@
 //! output frames go out with `Hub::push_all_budgeted` (a client whose outbox is over half full is skipped, never dropped; it gets one snapshot when it has
 //! room again, `catch_up`), input past 256 queued writes is dropped, one input request at most MAX_INPUT bytes,
 //! screens are the emulator's bounded grid and 2048-row scrollback.
+pub mod acp;
 pub mod browser;
 pub mod driver;
 pub mod emb;

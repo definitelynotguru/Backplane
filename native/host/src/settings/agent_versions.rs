@@ -19,6 +19,8 @@ pub const TABLE: &[Support] = &[
     Support { id: "opencode", title: "OpenCode", min: "2.3.0", tested: "2.3.0", update: &["upgrade"], page: "https://opencode.ai" },
     Support { id: "pi", title: "Pi", min: "1.4.0", tested: "1.4.0", update: &["update", "--self"], page: "https://pi.dev" },
     Support { id: "omp", title: "Oh My Pi", min: "18.18.8", tested: "18.18.8", update: &["update"], page: "https://github.com/can1357/oh-my-pi" },
+    // the ACP registry's version (agents/providers/acp_registry.rs): Backplane fetches each new one itself
+    Support { id: "devin", title: "Devin", min: "3000.14.30821", tested: "3000.14.30821", update: &[], page: "https://docs.devin.ai/cli" },
 ];
 pub fn of(id: &str) -> Option<&'static Support> { TABLE.iter().find(|s| s.id == id) }
 /// The program an agent runs as (Antigravity's is `agy`).

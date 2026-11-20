@@ -940,7 +940,9 @@ impl Actor {
         let root = self.ag.world().await.roots.get(&t.project).cloned().unwrap_or_default();
         if let Err(e) = remake_folder(cwd, &root).await { self.fail(format!("could not start codex: {e}"), "spawn", &format!("spawn-{now}")).await; self.ag.stats.spawn_failures.fetch_add(1, Relaxed); return }
         let Some(made) = providers::driver(&t.provider) else { self.fail(format!("{} threads are not run by the Rust hub yet", t.provider), "spawn", &format!("spawn-{now}")).await; return };
-        let mut prog = match (if self.person { self.person_prog(made.cli) } else { self.ag.cli.resolve(made.cli) }) { Ok(p) => p, Err(e) => { let hint = made.driver.install_hint().map(|h| format!(". {h}")).unwrap_or_default(); self.fail(format!("could not start {}: {e}{hint}", made.cli), "spawn", &format!("spawn-{now}")).await; self.ag.stats.spawn_failures.fetch_add(1, Relaxed); return } };
+        // an ACP Registry agent (providers/acp_registry.rs) is its fetched program, outside test mode, a copy and a person's own run
+        let registry = made.driver.registry().filter(|_| !self.person && self.ag.cli.dir().is_none() && !crate::copy::on());
+        let mut prog = match (if registry.is_some() { Ok(std::path::PathBuf::new()) } else if self.person { self.person_prog(made.cli) } else { self.ag.cli.resolve(made.cli) }) { Ok(p) => p, Err(e) => { let hint = made.driver.install_hint().map(|h| format!(". {h}")).unwrap_or_default(); self.fail(format!("could not start {}: {e}{hint}", made.cli), "spawn", &format!("spawn-{now}")).await; self.ag.stats.spawn_failures.fetch_add(1, Relaxed); return } };
         self.stop().await; self.lines = None; self.exit = None;
         // as for Claude (`spawn`): a thread bound to a named account runs under that profile's own home, after its identity is rechecked; one that cannot start goes on another login (`account_route`)
         let (mut acct_env, mut acct_args, mut busy, mut session_over) = (vec![], vec![], None, None::<String>);
@@ -975,7 +977,14 @@ impl Actor {
         self.tier_set(&th, &a.speed, now).await;
         let mut driver = made.driver;
         if let Err(e) = driver.prepare(&a) { let hint = driver.install_hint().map(|h| format!(". {h}")).unwrap_or_default(); self.fail(format!("could not start {}: {e}{hint}", made.cli), "spawn", &format!("spawn-{now}")).await; self.ag.stats.spawn_failures.fetch_add(1, Relaxed); return }
+        let mut lead = vec![];
+        if let Some(id) = registry { let home = self.ag.host.home.clone();
+            match tokio::task::spawn_blocking(move || providers::acp_registry::ensure(&home, id)).await.unwrap_or_else(|e| Err(e.to_string())) {
+                Ok(l) => { prog = l.program; lead = l.args }
+                Err(e) => { self.fail(format!("could not start {}: {e}", made.cli), "spawn", &format!("spawn-{now}")).await; self.ag.stats.spawn_failures.fetch_add(1, Relaxed); return }
+            } }
         let (mut args, mut env, start) = (driver.argv(&a), driver.env(&a), driver.start(&a));
+        if !lead.is_empty() { lead.extend(args); args = lead }
         if !acct_args.is_empty() { acct_args.extend(args); args = acct_args } env.extend(acct_env); env.extend(self.ag.kicad_env.lock().unwrap().clone());
         // the KiCad actor its own scripts (KiStack's layout tools) name themselves by, so their edits are this thread's in the open editor
         env.push(("BACKPLANE_KICAD_ACTOR".into(), crate::files::kicad::coedit::client_name(&crate::files::kicad::coedit::Who::Agent(&th))));
@@ -985,6 +994,13 @@ impl Actor {
                 if driver.closes_stdin() { p.input = mpsc::channel(1).0 } /* the writer ends once what was queued is written, and the process reads EOF */ self.driver = Some(driver); self.live_proc = Some(Live { input: p.input, pid: p.pid, key: String::new(), person: self.person, _busy: busy }); self.lines = Some(p.lines); self.exit = Some(p.exit) }
             Err(e) => { self.fail(format!("could not start {}: {e}", made.cli), "spawn", &format!("spawn-{now}")).await; self.ag.stats.spawn_failures.fetch_add(1, Relaxed); }
         }
+    }
+
+    /// A terminal request the process made (ACP terminal/*, providers/devin.rs): answered on its input by term/acp.rs once it is done (a wait lasts the command).
+    fn driver_term(&self, request: &Value) {
+        let Some(p) = &self.live_proc else { return };
+        let (hub, th, cwd, input, req) = (self.ag.hub.clone(), self.th.clone(), self.cwd.clone(), p.input.clone(), request.clone());
+        tokio::spawn(async move { let line = crate::term::acp::answer(&hub, &th, &cwd, &req, &input).await; let _ = input.send(line).await; });
     }
 
     /// A permission/question the process asked (providers::Driver docs): allowed-for-session answers at once, else an ask for the person.
@@ -1062,6 +1078,7 @@ impl Actor {
             if !self.cx.running { continue } // stopped_turn_quiet: what a stopped turn's process still says is old news
             for v in re.shapes {
             if v["type"] == "bp.ask" { if let Some(e) = self.driver_ask(&v["request"], at).await { events.extend(e) } continue }
+            if v["type"] == "bp.term" { self.driver_term(&v["request"]); continue }
             let fx = self.cx.codex_line(&v, &self.prov.clone(), &self.model.clone(), at);
             let end = turn_end(&fx.events);
             let verdict = crate::settings::driver::on_line(&self.ag.hub, self.ag.accounts.get(), &self.th, &v, end.as_deref(), &mut self.limit_seen).await;

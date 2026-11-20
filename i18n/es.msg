@@ -2975,6 +2975,7 @@ gpui.f.name.muse = Muse Code
 gpui.f.name.opencode = OpenCode
 gpui.f.name.pi = Pi
 gpui.f.name.omp = Oh My Pi
+gpui.f.name.devin = Devin
 gpui.f.name.fedora = Fedora
 gpui.f.name.arch = Arch
 gpui.f.name.homebrew = Homebrew

@@ -34,7 +34,8 @@ pub fn about() -> Value {
         "antigravity":{"cli":"","labels":{"default":"Antigravity's own default"}},
         "opencode":{"cli":"","version":"","labels":{"default":"opencode's configured default"},"error":""},
         "pi":{"cli":"","labels":{"default":"Pi's configured default"},"efforts":{"default":["off","minimal","low","medium","high"]}},
-        "omp":{"cli":"","labels":{"default":"Oh My Pi's configured default"},"efforts":{"default":["off","auto","minimal","low","medium","high"]}}
+        "omp":{"cli":"","labels":{"default":"Oh My Pi's configured default"},"efforts":{"default":["off","auto","minimal","low","medium","high"]}},
+        "devin":{"cli":"","labels":{"default":"Devin's own default"}}
     })
 }
 
@@ -42,7 +43,7 @@ pub fn about() -> Value {
 pub fn info() -> String { LIVE.read().ok().and_then(|g| g.as_ref().map(|(i, _)| i.clone())).unwrap_or_else(builtin) }
 /// The info for a machine whose CLIs have not been asked: Claude's aliases and nothing else.
 pub fn builtin() -> String {
-    json!({"claude":["fable","opus","sonnet","haiku"],"codex":[],"grok":[],"muse":[],"antigravity":[],"opencode":[],"pi":[],"omp":[],
+    json!({"claude":["fable","opus","sonnet","haiku"],"codex":[],"grok":[],"muse":[],"antigravity":[],"opencode":[],"pi":[],"omp":[],"devin":[],
         "agy":{"pin":AGY_PIN,"have":"","old":"","plat":true,"accts":[],"signed":[]},"about":about()}).to_string()
 }
 
@@ -96,7 +97,7 @@ pub fn default_now(chosen: &str, inventory: &str) -> String {
 #[cfg(test)]
 mod tests {
     /// The JS hub's `models` info with no agent CLI installed (build/gpui/results/parity-current/recA/session-mobile.json).
-    const JS: &str = r#"{"claude":["fable","opus","sonnet","haiku"],"codex":[],"grok":[],"muse":[],"antigravity":[],"opencode":[],"pi":[],"omp":[],"agy":{"pin":"1.3.0","have":"","old":"","plat":true,"accts":[],"signed":[]},"about":{"claude":{"cli":"","labels":{"default":"Claude Code's own default","fable":"Fable 5.1 · claude-fable-5-1","opus":"Opus 5.5 · claude-opus-5-5","sonnet":"Sonnet 5 · claude-sonnet-5","haiku":"Haiku 4.5 · claude-haiku-4-5"}},"codex":{"cli":"","labels":{"default":"Codex's configured default"}},"grok":{"cli":"","labels":{}},"muse":{"cli":"","labels":{}},"antigravity":{"cli":"","labels":{"default":"Antigravity's own default"}},"opencode":{"cli":"","version":"","labels":{"default":"opencode's configured default"},"error":""},"pi":{"cli":"","labels":{"default":"Pi's configured default"},"efforts":{"default":["off","minimal","low","medium","high"]}},"omp":{"cli":"","labels":{"default":"Oh My Pi's configured default"},"efforts":{"default":["off","auto","minimal","low","medium","high"]}}}}"#;
+    const JS: &str = r#"{"claude":["fable","opus","sonnet","haiku"],"codex":[],"grok":[],"muse":[],"antigravity":[],"opencode":[],"pi":[],"omp":[],"devin":[],"agy":{"pin":"1.3.0","have":"","old":"","plat":true,"accts":[],"signed":[]},"about":{"claude":{"cli":"","labels":{"default":"Claude Code's own default","fable":"Fable 5.1 · claude-fable-5-1","opus":"Opus 5.5 · claude-opus-5-5","sonnet":"Sonnet 5 · claude-sonnet-5","haiku":"Haiku 4.5 · claude-haiku-4-5"}},"codex":{"cli":"","labels":{"default":"Codex's configured default"}},"grok":{"cli":"","labels":{}},"muse":{"cli":"","labels":{}},"antigravity":{"cli":"","labels":{"default":"Antigravity's own default"}},"opencode":{"cli":"","version":"","labels":{"default":"opencode's configured default"},"error":""},"pi":{"cli":"","labels":{"default":"Pi's configured default"},"efforts":{"default":["off","minimal","low","medium","high"]}},"omp":{"cli":"","labels":{"default":"Oh My Pi's configured default"},"efforts":{"default":["off","auto","minimal","low","medium","high"]}},"devin":{"cli":"","labels":{"default":"Devin's own default"}}}}"#;
     #[test] fn models_info_is_the_js_hubs_for_a_machine_with_no_cli() { assert_eq!(super::builtin(), JS); }
     #[test] fn connected_is_what_settings_shows_connected() {
         let inv = serde_json::json!({"profiles":[{"provider":"codex","state":"connected"},{"provider":"claude","state":"expired"}],"defaultLogin":{"claude":{"state":"signed-out"},"grok":{"state":"known"}}}).to_string();
