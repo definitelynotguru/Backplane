@@ -41,5 +41,6 @@ run section-menu SectionMenuTests.swift "" SectionMenu.swift
 run mcp-page McpPageTests.swift "" McpPage.swift
 run cat-pick CatPickTests.swift "" CatPick.swift
 run reply-images ReplyImagesTests.swift "" ReplyImages.swift
+run reply-draft ReplyDraftTests.swift "" ReplyDraft.swift
 run viewer-rail ViewerRailTests.swift "" ViewerRail.swift
 sh "$ROOT/scripts/mobile/ios-outbox-test.sh" && echo "ok outbox"
