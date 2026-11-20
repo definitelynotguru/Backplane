@@ -1204,21 +1204,12 @@ async fn viewer_layout_over_a_socket_is_per_device_pushed_and_refuses_in_code_ke
     std::fs::write(dir.join("unit.kicad_sch"), "(kicad_sch)").unwrap();
     std::fs::create_dir_all(dir.join("mfg/rev1")).unwrap();
     std::fs::write(dir.join("mfg/rev1/unit-F_Cu.gbr"), "%FSLAX46Y46*%M02*").unwrap();
-    let more = format!("{}\n{}\n", json!({"$":"ProjectCreated","id":"pl","title":"L","root":root,"at":1700000050}), json!({"$":"ThreadCreated","id":"tl","project":"pl","title":"Layout","env":"local","branch":"","worktree":"","provider":"claude","model":"","at":1700000051}));
-    // the hub's watch set is a stand-in here (kicad/watch.rs has its own tests): it answers every source tile with one key and remembers the request
-    struct SetSpy(Arc<Mutex<Vec<Value>>>);
-    impl RpcHandler for SetSpy {
-        fn methods(&self) -> &'static [&'static str] { &["kicad.watch.set", "kicad.watch"] }
-        fn call<'a>(&'a self, _h: &'a Arc<Hub>, _w: &'a Caller, id: &'a Value, m: &'a str, p: &'a Value) -> Fut<'a, Vec<Value>> {
-            self.0.lock().unwrap().push(json!({"m": m, "p": p}));
-            let mut tiles = serde_json::Map::new();
-            for src in p["sources"].as_array().into_iter().flatten() { tiles.insert(s(src, "tile").to_string(), json!([format!("0|{}|{}", s(p, "root"), s(src, "path"))])); }
-            Box::pin(async move { vec![json!({"t":"reply","id":id,"ok":true,"result":{"tiles":tiles,"keys":[]}})] })
-        }
-    }
+    let more = format!("{}\n{}\n{}\n", json!({"$":"ProjectCreated","id":"pl","title":"L","root":root,"at":1700000050}), json!({"$":"ThreadCreated","id":"tl","project":"pl","title":"Layout","env":"local","branch":"","worktree":"","provider":"claude","model":"","at":1700000051}), json!({"$":"ThreadCreated","id":"tl2","project":"pl","title":"Second","env":"local","branch":"","worktree":"","provider":"claude","model":"","at":1700000052}));
     let (hub, port) = up_with("layout", &more).await;
-    let spy = Arc::new(Mutex::new(Vec::new()));
-    hub.register_rpc(Arc::new(SetSpy(spy.clone())));
+    // the REAL watch handler: the subscription table it keeps per connection is what the assertions read
+    let plots = crate::files::kicad::watch::Plots::new(&hub.hub.cfg.home);
+    hub.register_rpc(Arc::new(crate::files::kicad::watch::KicadRpc(plots.clone())));
+    let held = |plots: &Arc<crate::files::kicad::watch::Plots>| -> std::collections::BTreeMap<u64, Vec<String>> { (1..2_000_000u64).filter_map(|c| { let mut k = plots.watched_keys(c); k.sort(); (!k.is_empty()).then_some((c, k)) }).collect() };
     let _policies = crate::statehost::start(hub.hub.clone());
     for _ in 0..60 { if crate::statehost::booted(&hub.hub) && crate::statehost::with_state_of(&hub.hub, |st| st.threads.contains_key("tl")).unwrap_or(false) { break } tokio::time::sleep(Duration::from_millis(50)).await }
     let mut a = open(port, "&enc=json").await;
@@ -1230,7 +1221,7 @@ async fn viewer_layout_over_a_socket_is_per_device_pushed_and_refuses_in_code_ke
     assert_eq!(r["ok"], true, "{r}");
     assert_eq!((r["result"]["mode"].as_str(), r["result"]["tiles"].as_array().unwrap().len()), (Some("stack"), 1));
     assert_eq!(ask(&mut b, 1, "viewer.layout", json!({"thread":"tl","bounds":[1400,900],"page":"board"})).await["result"]["mode"], "full");
-    let r = ask(&mut a, 2, "viewer.layout.act", json!({"thread":"tl","op":"add","kind":"gerbers","bounds":[390,844]})).await;
+    let r = ask(&mut a, 2, "viewer.layout.act", json!({"thread":"tl","op":"add","kind":"gerbers","page":"board","bounds":[390,844]})).await;
     assert_eq!(r["ok"], true, "{r}");
     assert_eq!((r["result"]["tiles"].as_array().unwrap().len(), r["result"]["rev"].as_u64()), (2, Some(2)));
     assert!(r["result"].to_string().find(&root).is_none(), "no project folder in a reply: {r}");
@@ -1246,24 +1237,61 @@ async fn viewer_layout_over_a_socket_is_per_device_pushed_and_refuses_in_code_ke
     assert_eq!(ask(&mut a, 4, "viewer.layout", json!({"thread":"tl","bounds":"wide"})).await["error"]["code"], "invalidInput");
     // a source outside the project is refused, a linked machine's thread is refused
     assert_eq!(ask(&mut a, 5, "viewer.layout.act", json!({"thread":"tl","op":"add","kind":"gerbers","source":"../x","bounds":[390,844]})).await["error"]["code"], "invalidSource");
-    assert_eq!(ask(&mut a, 6, "viewer.layout", json!({"thread":"L~t1","bounds":[390,844]})).await["error"]["code"], "linked");
+    let far = ask(&mut a, 6, "viewer.layout", json!({"thread":"L~t1","bounds":[390,844],"page":"board"})).await;
+    assert!(far["ok"] == true && far["result"]["tiles"].as_array().unwrap().len() <= 1 && far["result"]["rev"] == 1, "a linked thread shows one derived tile: {far}");
+    assert_eq!(ask(&mut a, 6, "viewer.layout.act", json!({"thread":"L~t1","op":"add","kind":"mech","bounds":[390,844]})).await["error"]["code"], "linked");
     // an older phone that never asks is not affected: viewer.rail answers as it did
     assert_eq!(ask(&mut a, 7, "viewer.rail", json!({"thread":"tl","page":"board"})).await["ok"], true);
-    // the layout's watch set: every visible plot tile at once, each tile's keys named, no folder in the answer; a phone-sized fit watches only the tile it shows
+    // the layout's watch set, against the real handler: every visible plot tile at once, each tile's keys (an array per tile), no folder outside the keys
     let w = ask(&mut b, 3, "viewer.watch", json!({"thread":"tl","kind":"layout","bounds":[1400,900]})).await;
     assert_eq!(w["ok"], true, "{w}");
     assert_eq!(w["result"]["tiles"].as_object().unwrap().len(), 2, "{w}");
-    assert!(!w["result"]["keys"].as_array().unwrap().is_empty());
-    // the plot keys are the one place a folder appears (option A: today's plot keys, as the frames carry them); every other field is folder-free
+    assert!(w["result"]["tiles"].as_object().unwrap().values().all(|k| k.as_array().is_some_and(|a| !a.is_empty())));
     let mut other = w["result"].clone(); other.as_object_mut().unwrap().remove("tiles"); other.as_object_mut().unwrap().remove("keys");
     assert!(other.to_string().find(&root).is_none(), "no project folder in a watch reply outside its keys: {w}");
-    let w = ask(&mut a, 8, "viewer.watch", json!({"thread":"tl","kind":"layout","bounds":[390,844]})).await;
+    let table = held(&plots);
+    assert_eq!(table.len(), 1, "the handler holds b's set: {table:?}");
+    let (cb, keys_b) = table.iter().next().map(|(c, k)| (*c, k.clone())).unwrap();
+    let mut want: Vec<String> = w["result"]["keys"].as_array().unwrap().iter().map(|k| k.as_str().unwrap().to_string()).collect(); want.sort();
+    assert_eq!(keys_b, want);
+    // a watch-only caller is told of the layout's changes too, and so is the sender
+    let r = ask(&mut a, 20, "viewer.layout.act", json!({"thread":"tl","op":"add","kind":"files","page":"board","bounds":[390,844]})).await;
+    assert_eq!(r["ok"], true, "{r}");
+    let push = next(&mut b).await;
+    assert_eq!(push["t"], "layout", "{push}");
+    // a phone stack with Files focused: the visible set is EMPTY and the hub's handler is told (it stops what it was streaming for that connection)
+    let tiles = r["result"]["tiles"].as_array().unwrap().clone();
+    let files = tiles.iter().find(|t| t["kind"] == "files").unwrap()["id"].as_str().unwrap().to_string();
+    let board = tiles.iter().find(|t| t["kind"] == "board").unwrap()["id"].as_str().unwrap().to_string();
+    let w = ask(&mut a, 21, "viewer.watch", json!({"thread":"tl","kind":"layout","bounds":[390,844]})).await;
     assert_eq!(w["result"]["tiles"].as_object().unwrap().len(), 1, "{w}");
-    // a plain watch lets the set go: it carries `leave`; with no set held it does not
-    assert_eq!(ask(&mut a, 10, "viewer.watch", json!({"thread":"tl","kind":"board"})).await["ok"], true);
-    assert_eq!(spy.lock().unwrap().last().unwrap()["p"]["leave"], true, "the set the connection held is let go by its next watch");
-    assert_eq!(ask(&mut a, 12, "viewer.watch", json!({"thread":"tl","kind":"board"})).await["ok"], true);
-    assert!(spy.lock().unwrap().last().unwrap()["p"].get("leave").is_none());
-    // a bad bounds on a watch is refused as on a read
-    assert_eq!(ask(&mut a, 11, "viewer.watch", json!({"thread":"tl","kind":"layout","bounds":[0]})).await["error"]["code"], "invalidInput");
+    let ca = *held(&plots).keys().find(|c| **c != cb).expect("a's own set");
+    let r = ask(&mut a, 22, "viewer.layout.act", json!({"thread":"tl","op":"focus","tile":files,"bounds":[390,844]})).await;
+    assert_eq!(r["result"]["watch"]["tiles"], json!({}), "{r}");
+    assert_eq!(r["result"]["watch"]["keys"], json!([]));
+    assert!(plots.watched_keys(ca).is_empty(), "the empty set was sent: the hub no longer streams the Board to this connection");
+    // focus the Board again: the set comes back with the reply; b's set is untouched throughout
+    let r = ask(&mut a, 23, "viewer.layout.act", json!({"thread":"tl","op":"focus","tile":board,"bounds":[390,844]})).await;
+    assert_eq!(r["result"]["watch"]["tiles"].as_object().unwrap().len(), 1, "{r}");
+    assert_eq!(plots.watched_keys(ca).len(), 1);
+    assert_eq!(held(&plots).get(&cb), Some(&keys_b));
+    // a change on ANOTHER thread does not replace the watch this connection holds for `tl`
+    let r = ask(&mut a, 24, "viewer.layout.act", json!({"thread":"tl2","op":"add","kind":"gerbers","page":"board","bounds":[390,844]})).await;
+    assert_eq!(r["ok"], true, "{r}");
+    assert!(r["result"].get("watch").is_none(), "{r}");
+    assert_eq!(plots.watched_keys(ca).len(), 1);
+    // an invalid ordinary watch changes nothing: the connection still holds its set (the next valid one still lets it go)
+    assert_eq!(ask(&mut a, 25, "viewer.watch", json!({"thread":"tl","kind":"zzz"})).await["ok"], false);
+    let r = ask(&mut a, 26, "viewer.layout.act", json!({"thread":"tl","op":"focus","tile":files,"bounds":[390,844]})).await;
+    assert!(r["result"].get("watch").is_some(), "{r}");
+    // an ordinary watch lets the set go through `leave`, then replaces it as usual
+    assert_eq!(ask(&mut a, 27, "viewer.watch", json!({"thread":"tl","kind":"board"})).await["ok"], true);
+    assert_eq!(plots.watched_keys(ca).len(), 1);
+    let r = ask(&mut a, 28, "viewer.layout.act", json!({"thread":"tl","op":"focus","tile":board,"bounds":[390,844]})).await;
+    assert!(r["result"].get("watch").is_none(), "no set is held after the ordinary watch: {r}");
+    // bounds are required, and the refusal is the catalog's
+    let e = ask(&mut a, 29, "viewer.watch", json!({"thread":"tl","kind":"layout"})).await;
+    assert_eq!((e["error"]["code"].as_str(), e["error"]["key"].as_str()), (Some("invalidInput"), Some("viewer.layout.refusal.invalidinput")));
+    // zero bounds are clamped (to 100), not refused
+    assert_eq!(ask(&mut a, 30, "viewer.layout", json!({"thread":"tl","bounds":[0,0]})).await["result"]["bounds"], json!([100.0, 100.0]));
 }

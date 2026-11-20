@@ -45,7 +45,7 @@ fn no_absolute_paths(v: &Value, root: &str) {
 fn one_page_is_one_tile_and_an_add_is_two_tiles_fitted_to_the_device() {
     let f = fx();
     let store = Store::new();
-    let r = read(&f.st, &store, "dev", "t", DESKTOP, "board", false).unwrap();
+    let r = read(&f.st, &store, "dev", "t", DESKTOP, "board", false, &f.root).unwrap();
     assert_eq!((r["mode"].as_str(), tiles(&r), r["rev"].as_u64()), (Some("full"), vec!["board".to_string()], Some(1)));
     let r = act(&f, &store, "dev", "t", "add", json!({"kind":"gerbers","side":"right","page":"board"}), DESKTOP).unwrap();
     assert_eq!(tiles(&r), vec!["board", "gerbers"]);
@@ -54,10 +54,10 @@ fn one_page_is_one_tile_and_an_add_is_two_tiles_fitted_to_the_device() {
     assert_eq!(r["axis"], "row");
     no_absolute_paths(&r, &f.root);
     // the same tree, fitted to a tablet and a phone by each connection's own bounds
-    let tab = read(&f.st, &store, "dev", "t", TABLET, "", false).unwrap();
+    let tab = read(&f.st, &store, "dev", "t", TABLET, "", false, &f.root).unwrap();
     assert_eq!((tab["mode"].as_str(), tab["axis"].as_str(), tab["rev"].as_u64()), (Some("twoUp"), Some("col"), Some(2)));
     assert_eq!(tab["tiles"].as_array().unwrap().iter().filter(|t| t["visible"] == true).count(), 2);
-    let ph = read(&f.st, &store, "dev", "t", PHONE, "", false).unwrap();
+    let ph = read(&f.st, &store, "dev", "t", PHONE, "", false, &f.root).unwrap();
     assert_eq!(ph["mode"], "stack");
     assert_eq!(ph["tiles"].as_array().unwrap().iter().filter(|t| t["visible"] == true).count(), 1);
     assert_eq!(ph["order"].as_array().unwrap().len(), 2);
@@ -128,10 +128,10 @@ fn the_device_store_never_reads_or_writes_a_desktop_sessions_drafts() {
     // 3. the desktop's own derived layout is not the device's: the device sees its layout, the desktop session still its schematic
     let dv = viewer::viewer_json(&f.st, &json!({}), &desktop).unwrap();
     assert_eq!(dv["layout"]["root"]["kind"], "schematic");
-    assert_eq!(read(&f.st, &store, "phone", "t", DESKTOP, "", false).unwrap()["tiles"].as_array().unwrap().len(), 3);
+    assert_eq!(read(&f.st, &store, "phone", "t", DESKTOP, "", false, &f.root).unwrap()["tiles"].as_array().unwrap().len(), 3);
     // 4. another thread, another device: independent
-    assert_eq!(read(&f.st, &store, "phone", "u", DESKTOP, "board", false).unwrap()["tiles"].as_array().unwrap().len(), 1);
-    assert_eq!(read(&f.st, &store, "tablet", "t", DESKTOP, "schematic", false).unwrap()["tiles"].as_array().unwrap().len(), 1);
+    assert_eq!(read(&f.st, &store, "phone", "u", DESKTOP, "board", false, &f.root).unwrap()["tiles"].as_array().unwrap().len(), 1);
+    assert_eq!(read(&f.st, &store, "tablet", "t", DESKTOP, "schematic", false, &f.root).unwrap()["tiles"].as_array().unwrap().len(), 1);
     // 5. a patch that tries to carry other drafts back is not stored
     let mut s = session_for("t", Some(&e), "", false);
     crate::session::patch::merge(&mut s, &json!({"drafts":{"@composer:t":"x","@view:other":"board"}}));
@@ -153,11 +153,11 @@ fn two_connections_of_one_device_share_the_tree_and_are_told_of_a_change() {
     assert_eq!(p.iter().map(|(c, _)| *c).collect::<Vec<_>>(), vec![1, 2]);
     assert_eq!(p[0].1, json!({"t":"layout","thread":"t","rev":2}));
     // each connection reads its own fit of the one tree; a client holding rev 1 sees rev 2 and asks again
-    let a = read(&f.st, &store, "dev", "t", PHONE, "", false).unwrap();
-    let b = read(&f.st, &store, "dev", "t", DESKTOP, "", false).unwrap();
+    let a = read(&f.st, &store, "dev", "t", PHONE, "", false, &f.root).unwrap();
+    let b = read(&f.st, &store, "dev", "t", DESKTOP, "", false, &f.root).unwrap();
     assert_eq!((a["rev"].clone(), b["rev"].clone()), (json!(2), json!(2)));
     assert_eq!((a["mode"].as_str(), b["mode"].as_str()), (Some("stack"), Some("full")));
-    assert_eq!(read(&f.st, &store, "other", "t", PHONE, "board", false).unwrap()["rev"], 1);
+    assert_eq!(read(&f.st, &store, "other", "t", PHONE, "board", false, &f.root).unwrap()["rev"], 1);
     store.forget_client(2);
     assert_eq!(store.watchers_of("dev", "t"), vec![1]);
     assert_eq!(store.device_of(1).as_deref(), Some("dev"));
@@ -174,6 +174,7 @@ fn multi_tile_layouts_survive_a_restart_and_go_with_a_revoked_or_expired_device(
     act(&f, &store, "d2", "t", "add", json!({"kind":"mech","source":"mech/case.step","page":"board"}), DESKTOP).unwrap();
     // a layout that is one tile again is the page: nothing of it stays on disk
     act(&f, &store, "d2", "t", "close", json!({"tile":"t2"}), DESKTOP).unwrap();
+    store.flush();
     let text = std::fs::read_to_string(&file).unwrap();
     assert!(text.contains("d1") && !text.contains("d2"), "{text}");
     assert!(!text.contains(&f.root), "no absolute path on disk either: {text}");
@@ -182,13 +183,15 @@ fn multi_tile_layouts_survive_a_restart_and_go_with_a_revoked_or_expired_device(
     let back = Store::open(Some(file.clone()));
     let (a, b) = (store.entry("d1", "t").unwrap(), back.entry("d1", "t").unwrap());
     assert_eq!((a.drafts.get("@view.layout:t").cloned(), a.recent, a.rev), (b.drafts.get("@view.layout:t").cloned(), b.recent, b.rev));
-    assert_eq!(read(&f.st, &back, "d1", "t", DESKTOP, "", false).unwrap()["tiles"].as_array().unwrap().len(), 2);
+    assert_eq!(read(&f.st, &back, "d1", "t", DESKTOP, "", false, &f.root).unwrap()["tiles"].as_array().unwrap().len(), 2);
     assert!(back.entry("d2", "t").is_none());
     // revoked: its entries and its file entry go; the hub token's stay; expired devices go at the next prune
     back.put("hub", "t", Entry { drafts: store.entry("d1", "t").unwrap().drafts, rev: 1, ..Default::default() });
     act(&f, &back, "d3", "t", "add", json!({"kind":"mech","source":"mech/case.step","page":"board"}), DESKTOP).unwrap();
     back.forget_device("d1");
     assert!(!std::fs::read_to_string(&file).unwrap().contains("d1"));
+    back.flush();
+    assert!(!std::fs::read_to_string(&file).unwrap().contains("hub"), "the hub token's layout is in memory only");
     back.prune_to(&["d3".to_string()], 1_000_000);
     assert!(back.entry("d3", "t").is_some() && back.entry("hub", "t").is_some());
     back.prune_to(&[], 2_000_000);
@@ -250,9 +253,15 @@ fn only_viewer_tiles_the_limit_linked_threads_and_malformed_requests_are_refused
     }
     for ok in ["board", "schematic", "3d", "gerbers", "mech", "files", "diff", "review"] { assert!(TILE_KINDS.contains(&ok)); }
     // a linked machine's thread, an unknown thread, an unknown op
-    assert_eq!(read(&f.st, &store, "d", "L~t1", DESKTOP, "board", false).unwrap_err().code, "linked");
+    // a linked machine's thread shows ONE derived tile and stores nothing; every act on it is refused
+    let l = read(&f.st, &store, "d", "L~t1", DESKTOP, "board", false, &f.root).unwrap();
+    assert!(l["tiles"].as_array().unwrap().len() <= 1 && l["rev"] == 1, "{l}");
+    assert_eq!(store.len(), 0);
+    for op in ["add", "close", "focus", "maximize", "restore", "resize", "swap", "move", "overlay", "unsplit", "show"] {
+        assert_eq!(act(&f, &store, "d", "L~t1", op, json!({"kind":"mech","tile":"t1","page":"board"}), DESKTOP).unwrap_err().code, "linked", "{op}");
+    }
     assert_eq!(act(&f, &store, "d", "L~t1", "add", json!({"kind":"mech"}), DESKTOP).unwrap_err().code, "linked");
-    assert_eq!(read(&f.st, &store, "d", "nope", DESKTOP, "board", false).unwrap_err().code, "notFound");
+    assert_eq!(read(&f.st, &store, "d", "nope", DESKTOP, "board", false, &f.root).unwrap_err().code, "notFound");
     assert_eq!(act(&f, &store, "d", "t", "explode", json!({}), DESKTOP).unwrap_err().code, "invalidInput");
     assert_eq!(act(&f, &store, "d", "t", "close", json!({}), DESKTOP).unwrap_err().code, "invalidInput");
     assert_eq!(act(&f, &store, "d", "t", "close", json!({"tile": 5}), DESKTOP).unwrap_err().code, "invalidInput");
@@ -261,7 +270,7 @@ fn only_viewer_tiles_the_limit_linked_threads_and_malformed_requests_are_refused
     for i in 0..(MAX_TILES - 2) { act(&f, &store, "d", "t", "add", json!({"kind":"files","side":if i % 2 == 0 { "bottom" } else { "right" }}), DESKTOP).unwrap_or_else(|e| panic!("{i}: {e:?}")); }
     let e = act(&f, &store, "d", "t", "add", json!({"kind":"mech"}), DESKTOP).unwrap_err();
     assert_eq!(e.code, "tooManyTiles");
-    assert_eq!(read(&f.st, &store, "d", "t", DESKTOP, "", false).unwrap()["tiles"].as_array().unwrap().len(), MAX_TILES);
+    assert_eq!(read(&f.st, &store, "d", "t", DESKTOP, "", false, &f.root).unwrap()["tiles"].as_array().unwrap().len(), MAX_TILES);
 }
 
 #[test]
@@ -322,4 +331,150 @@ fn device_keys_are_paired_browser_or_hub() {
     assert_eq!(device_key(None, Some("b9")), "browser:b9");
     assert_eq!(device_key(None, None), "hub");
     assert_eq!(device_key(Some("d1".into()), Some("b9")), "browser:b9");
+}
+
+// ---- review round: passive reads, the source-aware show, the file, the watch set, the boundary
+
+#[test]
+fn a_read_is_passive_and_a_page_outside_the_protocol_is_refused() {
+    let f = fx();
+    let store = Store::new();
+    let r = read(&f.st, &store, "d", "t", PHONE, "board", false, &f.root).unwrap();
+    assert_eq!((r["rev"].clone(), store.len()), (json!(1), 0), "a read stores nothing");
+    // a page this protocol cannot hold never seeds a layout, on a read or on an act, and changes no rev
+    for bad in ["browser", "terminal", "simulation", "kicad", "zzz"] {
+        assert_eq!(read(&f.st, &store, "d", "t", PHONE, bad, false, &f.root).unwrap_err().code, "notOnDevice", "{bad}");
+        assert_eq!(act(&f, &store, "d", "t", "add", json!({"kind":"gerbers","page":bad}), PHONE).unwrap_err().code, "notOnDevice", "{bad}");
+    }
+    assert_eq!(store.len(), 0);
+    // Diff takes precedence over the page it was opened from
+    let d = read(&f.st, &store, "d", "t", PHONE, "board", true, &f.root).unwrap();
+    assert_eq!(tiles(&d), vec!["diff"], "{d}");
+    // reading again, with another page, with a layout of several tiles held: the tree and the rev are the device's, not the page's
+    act(&f, &store, "d", "t", "add", json!({"kind":"gerbers","page":"board"}), DESKTOP).unwrap();
+    let before = store.entry("d", "t").unwrap();
+    let r = read(&f.st, &store, "d", "t", DESKTOP, "mech", false, &f.root).unwrap();
+    assert_eq!((r["rev"].clone(), r["tiles"].as_array().unwrap().len()), (json!(2), 2));
+    assert_eq!(store.entry("d", "t").unwrap(), before, "a passive read changes nothing that is stored");
+}
+
+#[test]
+fn show_applies_its_source_and_never_closes() {
+    let f = fx();
+    let store = Store::new();
+    act(&f, &store, "d", "t", "add", json!({"kind":"gerbers","page":"board"}), DESKTOP).unwrap();
+    let a = act(&f, &store, "d", "t", "show", json!({"kind":"gerbers","source":"mfg/rev1"}), DESKTOP).unwrap();
+    assert!(a["tiles"].as_array().unwrap().iter().any(|t| t["kind"] == "gerbers" && t["source"] == "mfg/rev1"), "the named source is applied: {a}");
+    // a repeat keeps it (the rail's toggle would close it)
+    let b = act(&f, &store, "d", "t", "show", json!({"kind":"gerbers","source":"mfg/rev1"}), DESKTOP).unwrap();
+    assert!(b["tiles"].as_array().unwrap().iter().any(|t| t["kind"] == "gerbers" && t["source"] == "mfg/rev1"), "a repeat never closes: {b}");
+    assert_eq!(b["tiles"].as_array().unwrap().len(), a["tiles"].as_array().unwrap().len());
+    // a named board is the board shown, not the default
+    let c = act(&f, &store, "d", "t", "show", json!({"kind":"board","source":"unit.kicad_pcb"}), DESKTOP).unwrap();
+    assert!(c["tiles"].as_array().unwrap().iter().any(|t| t["kind"] == "board"), "{c}");
+    no_absolute_paths(&c, &f.root);
+}
+
+#[test]
+fn the_file_is_private_ordered_bounded_and_a_corrupt_one_is_kept() {
+    let f = fx();
+    let file = f.dir.join("viewer-layouts.json");
+    let store = Store::open(Some(file.clone()));
+    act(&f, &store, "d1", "t", "add", json!({"kind":"gerbers","page":"board"}), DESKTOP).unwrap();
+    // memory only until a write: nothing is on disk from `act`
+    assert!(!file.exists());
+    store.flush();
+    #[cfg(unix)]
+    { use std::os::unix::fs::PermissionsExt; assert_eq!(std::fs::metadata(&file).unwrap().permissions().mode() & 0o777, 0o600, "device ids and relative paths are private"); }
+    // nothing changed: nothing is written
+    std::fs::remove_file(&file).unwrap();
+    store.flush();
+    assert!(!file.exists(), "an unchanged store writes nothing");
+    // a later change writes the LATEST tree; a retired device is gone from the file the moment it is forgotten
+    act(&f, &store, "d1", "t", "add", json!({"kind":"schematic"}), DESKTOP).unwrap();
+    store.flush();
+    assert_eq!(Store::open(Some(file.clone())).entry("d1", "t").unwrap().rev, store.entry("d1", "t").unwrap().rev);
+    store.forget_device("d1");
+    assert!(!std::fs::read_to_string(&file).unwrap().contains("d1"));
+    // the limits hold for what is read back
+    let two = r#"{"drafts":{"@view.layout:T":"{}"},"recent":[],"rev":1}"#;
+    let mut devices = serde_json::Map::new();
+    for i in 0..(DEVICES + 5) {
+        let mut threads = serde_json::Map::new();
+        for j in 0..(THREADS_PER_DEVICE + 3) { let t = format!("t{j}"); threads.insert(t.clone(), serde_json::from_str::<Value>(&two.replace("T", &t)).unwrap()); }
+        devices.insert(format!("dev{i}"), Value::Object(threads));
+    }
+    let bin = f.dir.join("big.json");
+    std::fs::write(&bin, json!({"version":1,"devices":devices}).to_string()).unwrap();
+    let loaded = Store::open(Some(bin));
+    assert!(loaded.len() <= DEVICES * THREADS_PER_DEVICE);
+    let per: std::collections::BTreeMap<String, usize> = loaded.entries.lock().unwrap().keys().fold(Default::default(), |mut m, (d, _)| { *m.entry(d.clone()).or_default() += 1; m });
+    assert!(per.len() <= DEVICES && per.values().all(|n| *n <= THREADS_PER_DEVICE), "{per:?}");
+    // a file that is not JSON is copied aside, never silently dropped
+    let broken = f.dir.join("broken.json");
+    std::fs::write(&broken, "{\"devices\": ").unwrap();
+    assert_eq!(Store::open(Some(broken.clone())).len(), 0);
+    assert_eq!(std::fs::read_to_string(f.dir.join("broken.json.bad")).unwrap(), "{\"devices\": ");
+}
+
+#[test]
+fn one_store_per_home_and_a_push_goes_only_to_the_devices_own_connections() {
+    let (a, b) = (crate::plat::tmp::dir("data-layout-home-a"), crate::plat::tmp::dir("data-layout-home-b"));
+    assert!(std::ptr::eq(global(&a), global(&a)) && !std::ptr::eq(global(&a), global(&b)), "each hub home has its own store");
+    let store = Store::new();
+    store.register_client(1, "dev"); store.register_client(2, "dev"); store.register_client(3, "other"); store.register_client(4, "hub");
+    for (c, d) in [(1, "dev"), (2, "dev"), (3, "other"), (4, "hub")] { store.watch(d, "t", c); }
+    // a device's change reaches its own watching connections (the sender included) and no other device's, nor the hub token's
+    assert_eq!(pushes(&store, "dev", "t", 5).iter().map(|(c, _)| *c).collect::<Vec<_>>(), vec![1, 2]);
+    assert_eq!(pushes(&store, "hub", "t", 5).iter().map(|(c, _)| *c).collect::<Vec<_>>(), vec![4]);
+    assert!(pushes(&store, "dev", "other-thread", 5).is_empty());
+}
+
+#[test]
+fn a_saved_source_is_resolved_again_at_every_use_and_a_changed_link_is_not_followed() {
+    let f = fx();
+    let store = Store::new();
+    // canonical: a link inside the project is stored as where it really is
+    #[cfg(unix)]
+    {
+        std::os::unix::fs::symlink(f.dir.join("mfg/rev1"), f.dir.join("lnk")).unwrap();
+        assert_eq!(safe_source(&f.root, "lnk").unwrap(), "mfg/rev1");
+        assert_eq!(safe_source(&f.root, "./mfg/../mfg/rev1").unwrap_err().code, "invalidSource");
+        // a layout kept with the link's own name (an older file, or one edited by hand), the link then pointed OUT of the project
+        act(&f, &store, "d", "t", "add", json!({"kind":"gerbers","source":"mfg/rev1","page":"board"}), DESKTOP).unwrap();
+        let mut e = store.entry("d", "t").unwrap();
+        let text = e.drafts.get("@view.layout:t").unwrap().as_str().unwrap().replace("mfg/rev1", "swap");
+        e.drafts.insert("@view.layout:t".into(), json!(text));
+        store.put("d", "t", e);
+        let out = crate::plat::tmp::dir("data-layout-out2");
+        std::fs::write(out.join("f.gbr"), "x").unwrap();
+        std::os::unix::fs::symlink(&*out, f.dir.join("swap")).unwrap();
+        let r = read(&f.st, &store, "d", "t", DESKTOP, "", false, &f.root).unwrap();
+        assert!(r["tiles"].as_array().unwrap().iter().any(|t| t["unavailable"] == true), "the tile whose source left the project says so: {r}");
+        let set = watch_set_sources(&f.st, &store, "d", "t", DESKTOP, &f.root, "", false, false).unwrap();
+        assert!(set.iter().all(|s| !s["path"].as_str().unwrap_or("").contains("swap") && !s["path"].as_str().unwrap_or("").contains(out.to_str().unwrap())), "never watched: {set:?}");
+    }
+}
+
+#[test]
+fn the_watch_set_is_the_visible_plot_tiles_empty_and_single_included() {
+    let f = fx();
+    let store = Store::new();
+    // a phone stack: Board visible, then Files focused: the visible set is EMPTY, and is still the answer
+    act(&f, &store, "d", "t", "add", json!({"kind":"files","page":"board"}), PHONE).unwrap();
+    let set = |b, page: &str| watch_set_sources(&f.st, &store, "d", "t", b, &f.root, page, false, false).unwrap();
+    let focus = |tile: &str| act(&f, &store, "d", "t", "focus", json!({"tile": tile}), PHONE).unwrap();
+    let r = read(&f.st, &store, "d", "t", PHONE, "", false, &f.root).unwrap();
+    let (board, files) = (r["tiles"][0]["id"].as_str().unwrap().to_string(), r["tiles"][1]["id"].as_str().unwrap().to_string());
+    focus(&board);
+    assert_eq!(set(PHONE, "").len(), 1, "the Board tile is the stack's one visible tile");
+    focus(&files);
+    assert!(set(PHONE, "").is_empty(), "Files draws no plot: the set is empty and is still sent");
+    assert_eq!(set(DESKTOP, "").len(), 1, "both visible on a desktop: the Board's source");
+    // a device with ONE Board tile (no layout of several) watches that tile
+    let fresh = Store::new();
+    let one = watch_set_sources(&f.st, &fresh, "d", "t", PHONE, &f.root, "board", false, false).unwrap();
+    assert_eq!(one.len(), 1, "{one:?}");
+    assert!(watch_set_sources(&f.st, &fresh, "d", "t", PHONE, &f.root, "", false, false).unwrap().is_empty());
+    assert_eq!(watch_set_sources(&f.st, &fresh, "d", "t", PHONE, &f.root, "browser", false, false).unwrap_err().code, "notOnDevice");
 }

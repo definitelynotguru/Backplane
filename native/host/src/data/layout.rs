@@ -5,7 +5,9 @@
 //!
 //! One shared layout per (device, thread): the TREE is stored, never the fit; every connection sends its own bounds and gets its own fit
 //! (`present::layout_fit`). A change is pushed as `{t:"layout", thread, rev}` to the device's connections watching the thread; a client that sees a rev it
-//! does not hold asks again. Multi-tile layouts survive a hub restart (a small file under the hub's home, dropped when the device is revoked or gone).
+//! does not hold asks again. Multi-tile layouts of PAIRED devices (a native or browser device) survive a hub restart (a small file under the hub's home, mode 0600,
+//! dropped when the device is retired or its session has expired). A connection with the HUB token (device `hub`) has its layout in memory only: nothing of it is
+//! written to the file, and a restart forgets it.
 //!
 //! The device's layout is NEVER a desktop session's: the hub's pure layout operations run over a synthetic session built here from this device's own
 //! drafts, and only their `@view*:<thread>` drafts come back into this device's store. Nothing reads or writes a presenter session.
@@ -44,13 +46,18 @@ pub struct Store {
     /// (device, thread) → the connections that read this layout and are told when it changes
     watchers: Mutex<HashMap<(String, String), BTreeSet<u64>>>,
     /// connections holding a layout's watch set (`viewer.watch {kind:"layout"}`): another watch on one lets the set go
-    holding: Mutex<BTreeSet<u64>>,
+    holding: Mutex<HashMap<u64, String>>,
     file: Option<PathBuf>,
+    /// the memory differs from the file (a write is owed); `io` serialises writes, `written` is the body last written (an unchanged store writes nothing)
+    dirty: std::sync::atomic::AtomicBool,
+    io: Mutex<String>,
+    scheduled: std::sync::atomic::AtomicBool,
     tick: std::sync::atomic::AtomicU64,
     pruned: std::sync::atomic::AtomicU64,
 }
 
-static GLOBAL: OnceLock<Store> = OnceLock::new();
+/// One store per hub home (a process may run several hubs, as the tests do), each loaded from its home's file on first use.
+static STORES: Mutex<Vec<(PathBuf, &'static Store)>> = Mutex::new(Vec::new());
 
 /// A device's layouts are gone (revoked): from the hub's store and its file.
 pub fn forget_device_file(home: &Path, device: &str) {
@@ -60,22 +67,34 @@ pub fn forget_device_file(home: &Path, device: &str) {
 }
 
 /// The hub's store, loaded from its home on first use.
-pub fn global(home: &Path) -> &'static Store { GLOBAL.get_or_init(|| Store::open(Some(home.join("viewer-layouts.json")))) }
+pub fn global(home: &Path) -> &'static Store {
+    let mut g = STORES.lock().unwrap();
+    if let Some((_, st)) = g.iter().find(|(h, _)| h == home) { return st }
+    let st: &'static Store = Box::leak(Box::new(Store::open(Some(home.join("viewer-layouts.json")))));
+    g.push((home.to_path_buf(), st));
+    st
+}
 
 fn s<'a>(v: &'a Value, k: &str) -> &'a str { v.get(k).and_then(Value::as_str).unwrap_or("") }
 
 impl Store {
     pub fn new() -> Store { Store::open(None) }
     pub fn open(file: Option<PathBuf>) -> Store {
-        let st = Store { entries: Mutex::new(HashMap::new()), clients: Mutex::new(HashMap::new()), watchers: Mutex::new(HashMap::new()), holding: Mutex::new(BTreeSet::new()), file, tick: 0.into(), pruned: 0.into() };
+        let st = Store { entries: Mutex::new(HashMap::new()), clients: Mutex::new(HashMap::new()), watchers: Mutex::new(HashMap::new()), holding: Mutex::new(HashMap::new()), file, dirty: false.into(), io: Mutex::new(String::new()), scheduled: false.into(), tick: 0.into(), pruned: 0.into() };
         if let Some(f) = &st.file { st.load(f) }
         st
     }
     fn load(&self, file: &Path) {
-        let Ok(text) = std::fs::read_to_string(file) else { return };
-        let Ok(v) = serde_json::from_str::<Value>(&text) else { return };
+        let text = match std::fs::read_to_string(file) { Ok(t) => t, Err(e) if e.kind() == std::io::ErrorKind::NotFound => return, Err(e) => { eprintln!("viewer layouts: {} is unreadable ({e}); starting empty", file.display()); return } };
+        let Ok(v) = serde_json::from_str::<Value>(&text) else {
+            // a file that is not ours (or cut short): kept as `.bad` for whoever looks, never overwritten silently, and the store starts empty
+            let bad = file.with_extension("json.bad");
+            let _ = std::fs::copy(file, &bad);
+            eprintln!("viewer layouts: {} is not valid JSON; kept as {} and starting empty", file.display(), bad.display());
+            return;
+        };
         let mut g = self.entries.lock().unwrap();
-        for (device, threads) in v["devices"].as_object().into_iter().flatten() {
+        for (device, threads) in v["devices"].as_object().into_iter().flatten().filter(|(d, _)| *d != "hub") {
             for (thread, e) in threads.as_object().into_iter().flatten() {
                 let drafts = e["drafts"].as_object().cloned().unwrap_or_default();
                 // only what this module writes is read back: `@view*:<thread>` drafts holding a multi-tile layout
@@ -85,44 +104,90 @@ impl Store {
                 g.insert((device.clone(), thread.clone()), Entry { drafts, recent, rev: e["rev"].as_u64().unwrap_or(1).max(1), stamp: self.tick.fetch_add(1, std::sync::atomic::Ordering::Relaxed) });
             }
         }
+        // the limits hold for what is read back as for what is written
+        Self::bound(&mut g, None);
     }
-    /// Write the multi-tile layouts (atomic: a temporary file and a rename). Single-tile layouts are the page the device is on; they are not kept.
-    fn save(&self) {
+    /// Keep the store bounded: per device (`device`, when one just wrote) the least recently used thread out past the limit, then the least recent device.
+    fn bound(g: &mut HashMap<(String, String), Entry>, device: Option<&str>) {
+        let devices: BTreeSet<String> = match device { Some(d) => [d.to_string()].into(), None => g.keys().map(|(d, _)| d.clone()).collect() };
+        for d in devices {
+            loop {
+                let mine: Vec<_> = g.iter().filter(|((x, _), _)| *x == d).map(|(k, v)| (k.clone(), v.stamp)).collect();
+                if mine.len() <= THREADS_PER_DEVICE { break }
+                if let Some((k, _)) = mine.into_iter().min_by_key(|(_, st)| *st) { g.remove(&k); }
+            }
+        }
+        loop {
+            let devices: BTreeSet<String> = g.keys().map(|(d, _)| d.clone()).collect();
+            if devices.len() <= DEVICES { break }
+            let Some(old) = devices.into_iter().min_by_key(|d| g.iter().filter(|((x, _), _)| x == d).map(|(_, v)| v.stamp).max().unwrap_or(0)) else { break };
+            g.retain(|(d, _), _| *d != old);
+        }
+    }
+    /// Write the multi-tile layouts now (atomic: a 0600 temporary file and a rename), serialised with every other write; the LATEST tree is what is written, and
+    /// nothing is written when it equals what the file holds. Single-tile layouts are the page the device is on; they are not kept. Failures are logged.
+    pub fn flush(&self) {
         let Some(file) = &self.file else { return };
+        let mut written = self.io.lock().unwrap();
+        self.dirty.store(false, std::sync::atomic::Ordering::SeqCst);
         let mut devices = serde_json::Map::new();
         for ((device, thread), e) in self.entries.lock().unwrap().iter() {
-            if !has_layout(&e.drafts, thread) { continue }
+            // the hub token's layout (device `hub`) is never written
+            if device == "hub" || !has_layout(&e.drafts, thread) { continue }
             let slot = devices.entry(device.clone()).or_insert_with(|| json!({}));
             // only what is root-relative stays on disk: the layout and the picked board (`@view.file` & co. hold the absolute path the desktop derives)
             let kept: serde_json::Map<String, Value> = e.drafts.iter().filter(|(k, _)| persisted_key(k, thread)).map(|(k, v)| (k.clone(), v.clone())).collect();
             slot[thread] = json!({"drafts": kept, "recent": e.recent, "rev": e.rev});
         }
         let body = json!({"version": 1, "devices": devices}).to_string();
-        let tmp = file.with_extension(format!("json.{}.tmp", std::process::id()));
-        if std::fs::write(&tmp, body).is_ok() && crate::plat::fs::rename(&tmp, file).is_err() { let _ = std::fs::remove_file(&tmp); }
+        if *written == body { return }
+        // device ids and project-relative paths: the temporary file is created 0600 (as the device registry's is), then renamed over the file
+        use crate::plat::fs::OpenOptionsExt;
+        use std::io::Write;
+        let tmp = file.with_extension(format!("json.{}.{}.tmp", std::process::id(), self.tick.fetch_add(1, std::sync::atomic::Ordering::Relaxed)));
+        let r = (|| -> std::io::Result<()> {
+            let mut f = std::fs::OpenOptions::new().write(true).create_new(true).mode(0o600).open(&tmp)?;
+            f.write_all(body.as_bytes())?; f.sync_all()?; drop(f);
+            crate::plat::fs::rename(&tmp, file)
+        })();
+        match r {
+            Ok(()) => *written = body,
+            Err(e) => { let _ = std::fs::remove_file(&tmp); self.dirty.store(true, std::sync::atomic::Ordering::SeqCst); eprintln!("viewer layouts: could not write {}: {e}", file.display()); }
+        }
+    }
+    /// A change is owed to the file. No I/O here (this runs inside the state's lock): `persist_soon` writes it, off that lock.
+    fn touch(&self) { self.dirty.store(true, std::sync::atomic::Ordering::SeqCst); }
+    /// Write what is owed after a short pause (one writer at a time; a burst of drag positions is one write of the last tree). Not under any hub lock.
+    pub fn persist_soon(&'static self) {
+        if self.file.is_none() || !self.dirty.load(std::sync::atomic::Ordering::SeqCst) { return }
+        if self.scheduled.swap(true, std::sync::atomic::Ordering::SeqCst) { return }
+        std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_millis(300));
+            self.scheduled.store(false, std::sync::atomic::Ordering::SeqCst);
+            self.flush();
+        });
     }
 
     pub fn entry(&self, device: &str, thread: &str) -> Option<Entry> { self.entries.lock().unwrap().get(&(device.to_string(), thread.to_string())).cloned() }
     pub fn len(&self) -> usize { self.entries.lock().unwrap().len() }
-    /// Store `e` for (device, thread), keeping the store bounded; a layout that is a single tile is the page, so nothing of it stays on disk.
+    /// Store `e` for (device, thread), keeping the store bounded. Memory only: the file follows (`persist_soon`).
     pub fn put(&self, device: &str, thread: &str, mut e: Entry) {
+        let mut g = self.entries.lock().unwrap();
+        // what is already held is not written again, and a read of it is not a use that moves it up the recency list
+        if let Some(old) = g.get(&(device.to_string(), thread.to_string())) { let mut same = e.clone(); same.stamp = old.stamp; if *old == same { return } }
         e.stamp = self.tick.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        { let mut g = self.entries.lock().unwrap();
-          g.insert((device.to_string(), thread.to_string()), e);
-          // least recently used out: per device, then across devices
-          let mine: Vec<_> = g.iter().filter(|((d, _), _)| d == device).map(|(k, v)| (k.clone(), v.stamp)).collect();
-          if mine.len() > THREADS_PER_DEVICE { if let Some((k, _)) = mine.into_iter().min_by_key(|(_, st)| *st) { g.remove(&k); } }
-          let devices: BTreeSet<String> = g.keys().map(|(d, _)| d.clone()).collect();
-          if devices.len() > DEVICES {
-              if let Some(old) = devices.into_iter().min_by_key(|d| g.iter().filter(|((x, _), _)| x == d).map(|(_, v)| v.stamp).max().unwrap_or(0)) { g.retain(|(d, _), _| *d != old); }
-          } }
-        self.save();
+        g.insert((device.to_string(), thread.to_string()), e);
+        Self::bound(&mut g, Some(device));
+        drop(g);
+        self.touch();
     }
     /// A device's layouts are gone: revoked, logged out, expired.
     pub fn forget_device(&self, device: &str) {
         self.entries.lock().unwrap().retain(|(d, _), _| d != device);
         self.watchers.lock().unwrap().retain(|(d, _), _| d != device);
-        self.save();
+        // a retired device is gone from the file before this returns: the latest tree is written, so a write still owed cannot bring it back
+        self.touch();
+        self.flush();
     }
     /// Drop every device not in `live` (the hub token's `hub` always stays).
     pub fn prune(&self, live: &BTreeSet<String>) -> usize {
@@ -145,8 +210,10 @@ impl Store {
         for w in self.watchers.lock().unwrap().values_mut() { w.remove(&client); }
         self.holding.lock().unwrap().remove(&client);
     }
-    pub fn hold(&self, client: u64, on: bool) { let mut h = self.holding.lock().unwrap(); if on { h.insert(client); } else { h.remove(&client); } }
-    pub fn holds(&self, client: u64) -> bool { self.holding.lock().unwrap().contains(&client) }
+    /// The connection now holds a layout watch set for `thread` (None: it holds none).
+    pub fn hold(&self, client: u64, thread: Option<&str>) { let mut h = self.holding.lock().unwrap(); match thread { Some(t) => { h.insert(client, t.to_string()); } None => { h.remove(&client); } } }
+    /// The thread whose layout watch set the connection holds.
+    pub fn held(&self, client: u64) -> Option<String> { self.holding.lock().unwrap().get(&client).cloned() }
     fn watch(&self, device: &str, thread: &str, client: u64) { self.watchers.lock().unwrap().entry((device.to_string(), thread.to_string())).or_default().insert(client); }
     /// The connections of `device` watching `thread`.
     pub fn watchers_of(&self, device: &str, thread: &str) -> Vec<u64> { self.watchers.lock().unwrap().get(&(device.to_string(), thread.to_string())).map(|w| w.iter().copied().collect()).unwrap_or_default() }
@@ -164,6 +231,9 @@ fn has_layout(drafts: &serde_json::Map<String, Value>, thread: &str) -> bool {
 
 /// The synthetic session the hub's layout code reads for this device: its own drafts and nothing else (no `info`, no other thread's drafts).
 pub fn session_for(thread: &str, entry: Option<&Entry>, page: &str, diff: bool) -> Value {
+    // Diff takes precedence over the page it was opened from (as the rail's `diff` flag does): the Diff panel is on and no page is
+    let diff = diff && entry.is_none();
+    let page = if diff { "" } else { page };
     let mut drafts = serde_json::Map::new();
     match entry { Some(e) => for (k, v) in &e.drafts { if owned_key(k, thread) { drafts.insert(k.clone(), v.clone()); } },
         None => {
@@ -172,7 +242,7 @@ pub fn session_for(thread: &str, entry: Option<&Entry>, page: &str, diff: bool) 
             if !open.is_empty() { drafts.insert(format!("@view:{thread}"), json!(open)); }
             if !gerbers.is_empty() { drafts.insert(format!("@view.gerbers:{thread}"), json!(gerbers)); }
         } }
-    let _ = diff;
+    if diff { return json!({"sel": thread, "rid": 1, "drafts": drafts, "panel": true, "info": {format!("view.kind:{thread}"): "diff", format!("panel:{thread}"): "1"}}) }
     json!({"sel": thread, "rid": 1, "drafts": drafts, "panel": false, "info": {}})
 }
 
@@ -181,6 +251,34 @@ pub fn parse_bounds(v: &Value) -> Result<(f32, f32), Refused> {
     let a = v.as_array().filter(|a| a.len() == 2).ok_or_else(|| Refused::of(Refusal::InvalidInput))?;
     let n = |x: &Value| x.as_f64();
     match (n(&a[0]), n(&a[1])) { (Some(w), Some(h)) => Ok(layout_fit::clamp_bounds(w, h)), _ => Err(Refused::of(Refusal::InvalidInput)) }
+}
+
+/// The `page` a client says it is on: one of the tile kinds or nothing (a passive read must not seed a page this protocol cannot hold).
+fn check_page(page: &str) -> Result<(), Refused> {
+    if page.is_empty() || TILE_KINDS.contains(&page) { Ok(()) } else { Err(extra("notOnDevice", "viewer.layout.refusal.notondevice")) }
+}
+
+/// Mark the tiles whose named source no longer resolves INSIDE the project (a link changed after it was saved): they are not watched, and say so.
+fn mark_unavailable(out: &mut Value, l: &Layout, root: &str) {
+    if root.is_empty() { return }
+    let bad: BTreeSet<String> = unresolved(l, root);
+    for t in out["tiles"].as_array_mut().into_iter().flatten() { if t["id"].as_str().is_some_and(|i| bad.contains(i)) { t["unavailable"] = json!(true); } }
+}
+/// The ids of the tiles with a tile or overlay source that does not resolve inside `root` now.
+fn unresolved(l: &Layout, root: &str) -> BTreeSet<String> {
+    l.tiles().into_iter().filter(|t| std::iter::once(t.source.as_str()).chain(t.overlay.iter().map(|o| o.source.as_str())).any(|src| !src.is_empty() && safe_source(root, src).is_err()))
+        .map(|t| t.id.clone()).collect()
+}
+/// The layout with every named source replaced by its canonical path inside `root` (resolved now, at this use), so what is opened is what was checked.
+fn resolved(l: &Layout, root: &str) -> Layout {
+    fn walk(v: &mut Value, root: &str) {
+        if let Some(src) = v.get("source").and_then(Value::as_str).filter(|x| !x.is_empty()).map(str::to_string) { if let Ok(c) = safe_source(root, &src) { v["source"] = json!(c) } }
+        if v.get("overlay").is_some_and(Value::is_object) { walk(&mut v["overlay"], root) }
+        for k in ["a", "b", "root"] { if v.get(k).is_some_and(Value::is_object) { walk(&mut v[k], root) } }
+    }
+    let mut v = serde_json::to_value(l).unwrap_or(Value::Null);
+    walk(&mut v, root);
+    serde_json::from_value(v).unwrap_or_else(|_| l.clone())
 }
 
 /// A refusal as data/1 answers it: `{code, key, message}`, the message from the catalog in the hub's language.
@@ -204,7 +302,11 @@ pub fn safe_source(root: &str, source: &str) -> Result<String, Refused> {
     if root.is_empty() { return Err(bad()) }
     let (Ok(base), Ok(full)) = (std::fs::canonicalize(root), std::fs::canonicalize(Path::new(root).join(&rel))) else { return Err(bad()) };
     if !full.starts_with(&base) { return Err(bad()) }
-    Ok(rel)
+    // what is kept is the canonical path (a link inside the project is followed to where it really is, still inside it), so what is opened later is what was checked
+    let canon = full.strip_prefix(&base).ok().and_then(|p| p.to_str()).map(|p| p.replace(std::path::MAIN_SEPARATOR, "/")).ok_or_else(bad)?;
+    if canon.is_empty() || !layout::is_relative_source(&canon) { return Err(bad()) }
+    let _ = rel;
+    Ok(canon)
 }
 
 /// The tile JSON of one tile: no field of it is an absolute path.
@@ -238,32 +340,24 @@ fn current(st: &crate::state::State, session: &Value) -> Layout {
 }
 
 /// What `viewer.layout` answers: the device's tree fitted to `bounds`. The page the device is on (`page`, `diff`) is what a device with no layout of several
-/// tiles is looking at: it is that one tile, kept so a following op starts from what was read; a change of page moves the tree (a new `rev`).
-pub fn read(st: &crate::state::State, store: &Store, device: &str, thread: &str, bounds: (f32, f32), page: &str, diff: bool) -> Result<Value, Refused> {
+/// tiles is looking at: it is that one tile. A read is PASSIVE: it never changes what is stored nor the `rev` (a later `act` carries the page again to start from
+/// it); a thread of another machine shows the one derived tile, never stored, and every `act` on it is refused.
+pub fn read(st: &crate::state::State, store: &Store, device: &str, thread: &str, bounds: (f32, f32), page: &str, diff: bool, root: &str) -> Result<Value, Refused> {
+    check_page(page)?;
+    if thread.contains('~') {
+        let l = current(st, &session_for(thread, None, page, diff));
+        return Ok(reply(thread, 1, &l, &layout_fit::fit(&l, &[], bounds)));
+    }
     check_thread(st, thread)?;
     let entry = store.entry(device, thread);
     let multi = entry.as_ref().is_some_and(|e| has_layout(&e.drafts, thread));
-    if !multi && !page.is_empty() {
-        // a single page: the tree is derived from it, and kept (in memory) so the next op starts here
-        let session = session_for(thread, None, page, diff);
-        let l = current(st, &session);
-        let mut e = entry.clone().unwrap_or(Entry { rev: 1, ..Default::default() });
-        let before = if entry.is_some() { current(st, &session_for(thread, entry.as_ref(), "", false)) } else { Layout::empty() };
-        let moved = entry.is_some() && serde_json::to_value(&before).ok() != serde_json::to_value(&l).ok();
-        e.drafts = session["drafts"].as_object().cloned().unwrap_or_default();
-        if moved { e.rev += 1; }
-        e.recent.retain(|x| l.contains_tile(x));
-        if let Some(f) = l.focus.clone() { e.recent.retain(|x| *x != f); e.recent.insert(0, f); }
-        let rev = e.rev;
-        let fitted = layout_fit::fit(&l, &e.recent, bounds);
-        let out = reply(thread, rev, &l, &fitted);
-        if entry.as_ref() != Some(&e) { store.put(device, thread, e); }
-        return Ok(out);
-    }
-    let session = session_for(thread, entry.as_ref(), page, diff);
+    // several tiles are the device's own tree; otherwise the page it says it is on (or the one kept from its last change)
+    let session = if multi || page.is_empty() { session_for(thread, entry.as_ref(), "", false) } else { session_for(thread, None, page, diff) };
     let l = current(st, &session);
     let (rev, recent) = entry.map_or((1, vec![]), |e| (e.rev, e.recent));
-    Ok(reply(thread, rev, &l, &layout_fit::fit(&l, &recent, bounds)))
+    let mut out = reply(thread, rev, &l, &layout_fit::fit(&l, &recent, bounds));
+    mark_unavailable(&mut out, &l, root);
+    Ok(out)
 }
 
 fn check_thread(st: &crate::state::State, thread: &str) -> Result<(), Refused> {
@@ -333,14 +427,16 @@ pub fn act(st: &crate::state::State, store: &Store, device: &str, thread: &str, 
     if !OPS.contains(&op) { return Err(Refused::of_for(Refusal::InvalidInput, locale)) }
     let entry = store.entry(device, thread);
     let page = s(p, "page");
+    check_page(page)?;
     let session = session_for(thread, entry.as_ref(), page, p["diff"] == true);
     let before = current(st, &session);
     // a layout never holds more tiles than the limit, whatever an op adds
     let out = if op == "show" {
         let kind = s(p, "kind");
         if kind != "split" && !TILE_KINDS.contains(&kind) { return Err(extra("notOnDevice", "viewer.layout.refusal.notondevice")) }
-        if let Some(src) = p.get("source").and_then(Value::as_str) { safe_source(root, src)?; }
-        viewer::view_action_for(st, "", &session, None, locale, kind, 0)
+        // the source-aware idempotent show (an agent's `viewer_show`'s own path): it applies the kind WITH its source, focuses or retargets, and never closes
+        let src = match p.get("source").and_then(Value::as_str) { Some(src) => safe_source(root, src)?, None => String::new() };
+        viewer::viewer_show_action(st, "", &session, None, locale, kind, &src)
     } else {
         let (action, mut payload) = action_of(op, p, root, bounds).map_err(|r| Refused { text: Refusal::InvalidInput.text_for(locale), ..r })?;
         // the guard fields are the desktop's own: a data/1 client holds no KiCad, so nothing it sends can name a lock or a KiCad tile
@@ -370,6 +466,7 @@ pub fn act(st: &crate::state::State, store: &Store, device: &str, thread: &str, 
     let fitted = layout_fit::fit(&after, &e.recent, bounds);
     store.put(device, thread, e);
     let mut r = reply(thread, rev, &after, &fitted);
+    mark_unavailable(&mut r, &after, root);
     r["changed"] = json!(changed);
     Ok(r)
 }
@@ -390,74 +487,92 @@ pub async fn call(hub: &Arc<Hub>, c: &mut crate::hub::Conn, m: &str, p: &Value) 
     let device = store.device_of(c.client).unwrap_or_else(|| "hub".to_string());
     let locale = hub.setting("ui.lang").await.unwrap_or_default();
     let th = s(p, "thread").to_string();
-    let bounds = parse_bounds(p.get("bounds").unwrap_or(&Value::Null)).map_err(|r| r.to_value())?;
+    let bounds = parse_bounds(p.get("bounds").unwrap_or(&Value::Null)).map_err(|r| localized(r, &locale))?;
     // the project's design folder, as `viewer.files` answers it, for the sources a client names
     let root = if th.contains('~') { String::new() } else { crate::files::kicad::canonical::design_root(&super::ext::root_of(hub, &th).await.unwrap_or_default()) };
     let r = crate::statehost::with_state_of(hub, |st| match m {
-        "viewer.layout" => read(st, store, &device, &th, bounds, s(p, "page"), p["diff"] == true),
+        "viewer.layout" => read(st, store, &device, &th, bounds, s(p, "page"), p["diff"] == true, &root),
         _ => act(st, store, &device, &th, s(p, "op"), p, &root, &locale, bounds),
     });
-    let r = match r { Some(r) => r, None => { let r = extra("starting", "viewer.layout.refusal.starting"); return Err(Refused { text: layout::catalog_text(r.key, &locale).unwrap_or(r.text), ..r }.to_value()) } };
+    // whatever the state's lock saw changed is written now, off that lock
+    store.persist_soon();
+    let r = match r { Some(r) => r, None => return Err(localized(extra("starting", "viewer.layout.refusal.starting"), &locale)) };
     match r {
-        Ok(v) => {
+        Ok(mut v) => {
+            // a connection that read or changed the layout hears of its changes
             store.watch(&device, &th, c.client);
-            let mut v = v;
             if m == "viewer.layout.act" && v["changed"] == true {
+                // every connection of the device watching this thread, the sender included (its reply carries the same rev)
                 for (client, frame) in pushes(store, &device, &th, v["rev"].as_u64().unwrap_or(0)) { hub.push(client, frame); }
-                // a connection holding the layout's watch set has the new one installed with the answer
-                if store.holds(c.client) { if let Ok(w) = install(hub, c, store, &device, &th, bounds, false, &locale).await { v["watch"] = w; } }
+                // a connection holding THIS thread's watch set gets the new set with the answer; a failure is told, never dropped
+                if store.held(c.client).as_deref() == Some(th.as_str()) {
+                    match install(hub, c, store, &device, &th, bounds, false, &locale).await { Ok(w) => v["watch"] = w, Err(e) => v["watchError"] = e }
+                }
             }
             Ok(v)
         }
-        Err(r) => Err(Refused { text: layout::catalog_text(r.key, &locale).unwrap_or(r.text), ..r }.to_value()),
+        Err(r) => Err(localized(r, &locale)),
     }
 }
 
 /// The plot sources of the tiles of `device`'s layout of `thread` that are visible at `bounds`, as `kicad.watch.set` takes them (the hub builds the paths: they
-/// are never sent to the device). A tile of a version, which the hub cannot yet watch for a device, has none. Empty: the device has no layout of several tiles.
-fn watch_set_sources(st: &crate::state::State, store: &Store, device: &str, thread: &str, bounds: (f32, f32), root: &str, force: bool) -> Result<Vec<Value>, Refused> {
+/// are never sent to the device), each source resolved inside the project NOW. The set is the visible plot tiles whatever their number: one Board tile has its
+/// source, and a layout whose visible tiles draw nothing (Files in a phone stack) has none.
+fn watch_set_sources(st: &crate::state::State, store: &Store, device: &str, thread: &str, bounds: (f32, f32), root: &str, page: &str, diff: bool, force: bool) -> Result<Vec<Value>, Refused> {
     check_thread(st, thread)?;
+    check_page(page)?;
     let entry = store.entry(device, thread);
-    if !entry.as_ref().is_some_and(|e| has_layout(&e.drafts, thread)) { return Ok(vec![]) }
-    let l = current(st, &session_for(thread, entry.as_ref(), "", false));
+    let multi = entry.as_ref().is_some_and(|e| has_layout(&e.drafts, thread));
+    let session = if multi || page.is_empty() { session_for(thread, entry.as_ref(), "", false) } else { session_for(thread, None, page, diff) };
+    let l = current(st, &session);
+    // every named source is resolved again against the folder now: a link changed since it was saved is not followed (its tile is not watched)
+    let bad = unresolved(&l, root);
+    let l = resolved(&l, root);
     let fitted = layout_fit::fit(&l, entry.as_ref().map(|e| e.recent.as_slice()).unwrap_or(&[]), bounds);
     let visible: BTreeSet<&str> = fitted.visible.iter().map(|(i, _)| i.as_str()).collect();
-    Ok(viewer::watch_sources(&l, root, false, force).into_iter().filter(|e| e["tile"].as_str().is_some_and(|t| visible.contains(t))).collect())
+    Ok(viewer::watch_sources(&l, root, false, force).into_iter().filter(|e| e["tile"].as_str().is_some_and(|t| visible.contains(t) && !bad.contains(t))).collect())
 }
 
-/// Install `device`'s visible plot tiles as this connection's watch set: `{tiles: {tileId: [keys]}, keys: [...]}`.
+/// Install `device`'s visible plot tiles as this connection's watch set: `{thread, tiles: {tileId: [keys]}, keys: [...]}`. The set is sent EVERY time, empty
+/// included (the hub then stops what it was streaming). The connection holds the set for `thread` only after the handler answered.
 async fn install(hub: &Arc<Hub>, c: &mut crate::hub::Conn, store: &Store, device: &str, th: &str, bounds: (f32, f32), force: bool, locale: &str) -> Result<Value, Value> {
+    install_page(hub, c, store, device, th, bounds, force, locale, "", false).await
+}
+async fn install_page(hub: &Arc<Hub>, c: &mut crate::hub::Conn, store: &Store, device: &str, th: &str, bounds: (f32, f32), force: bool, locale: &str, page: &str, diff: bool) -> Result<Value, Value> {
+    if th.contains('~') { return Err(localized(extra("linked", "viewer.layout.refusal.linked"), locale)) }
     let root = crate::files::kicad::canonical::design_root(&super::ext::root_of(hub, th).await.unwrap_or_default());
-    let sources = match crate::statehost::with_state_of(hub, |st| watch_set_sources(st, store, device, th, bounds, &root, force)) {
+    let sources = match crate::statehost::with_state_of(hub, |st| watch_set_sources(st, store, device, th, bounds, &root, page, diff, force)) {
         Some(r) => r.map_err(|r| localized(r, locale))?,
         None => return Err(localized(extra("starting", "viewer.layout.refusal.starting"), locale)),
     };
-    if sources.is_empty() { store.hold(c.client, false); return Ok(json!({"thread": th, "tiles": {}, "keys": []})) }
     let r = match super::rpc(hub, c, "kicad.watch.set", json!({"root": root, "sources": sources})).await {
         Ok(r) => r,
         Err(e) if e.as_str().is_some_and(|t| t.contains("too many")) => return Err(localized(Refused::of(Refusal::TooManySources), locale)),
         Err(e) => return Err(e),
     };
-    store.hold(c.client, true);
+    // the hub holds the set now: only now does the connection
+    store.hold(c.client, Some(th));
     let tiles = r["result"]["tiles"].clone();
     let mut keys: Vec<Value> = vec![];
     for ks in tiles.as_object().into_iter().flat_map(|m| m.values()) { for k in ks.as_array().into_iter().flatten() { if !keys.contains(k) { keys.push(k.clone()) } } }
-    Ok(json!({"thread": th, "tiles": tiles, "keys": keys}))
+    Ok(json!({"thread": th, "tiles": if tiles.is_object() { tiles } else { json!({}) }, "keys": keys}))
 }
 
 fn localized(r: Refused, locale: &str) -> Value { Refused { text: layout::catalog_text(r.key, locale).unwrap_or(r.text), ..r }.to_value() }
 
-/// `viewer.watch {thread, kind: "layout", bounds, force?}`: the plot sources of the device's visible tiles watched at once; the answer names each tile's keys.
-/// Another `viewer.watch` on this connection (see `ext.rs`) lets the set go.
+/// `viewer.watch {thread, kind: "layout", bounds, page?, diff?, force?}`: the plot sources of the device's visible tiles watched at once; `bounds` is required.
+/// The answer names each tile's keys (an array per tile: a 3D tile draws from two). A connection calling it is told of the layout's changes, as a reader is.
+/// Another `viewer.watch` on this connection lets the set go (`leave`, in `ext.rs`).
 pub async fn watch(hub: &Arc<Hub>, c: &mut crate::hub::Conn, p: &Value) -> Result<Value, Value> {
     let store = global(&hub.cfg.home);
     let device = store.device_of(c.client).unwrap_or_else(|| "hub".to_string());
     let locale = hub.setting("ui.lang").await.unwrap_or_default();
     let th = s(p, "thread");
-    let bounds = parse_bounds(p.get("bounds").unwrap_or(&Value::Null)).map_err(|r| r.to_value())?;
-    install(hub, c, store, &device, th, bounds, p["force"] == true, &locale).await
+    let bounds = parse_bounds(p.get("bounds").unwrap_or(&Value::Null)).map_err(|r| localized(r, &locale))?;
+    let out = install_page(hub, c, store, &device, th, bounds, p["force"] == true, &locale, s(p, "page"), p["diff"] == true).await?;
+    store.watch(&device, th, c.client);
+    Ok(out)
 }
-
 
 #[cfg(test)]
 #[path = "layout_tests.rs"]
