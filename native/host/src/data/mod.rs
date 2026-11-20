@@ -271,7 +271,9 @@ fn act_entry(thread: &str, id: &str, role: &str, akind: &str, text: &str, at: u6
         r if r == crate::term::emb::TONE && akind == crate::term::emb::KIND => term::entry(thread, id, text, at),
         "step" if pt::step_base(&e) => return None,
         "step" => json!({"id":id,"kind":"step","text":text,"label":pt::step_row(&e),"at":at}),
-        _ => { let a = pt::plain_act(&e); let mut n = json!({"id":id,"kind":"note","text":a["text"],"label":a["label"],"tone":a["tone"],"at":at}); if a.get("copy").is_some() { n["copy"] = a["copy"].clone() } n }
+        _ => { let a = pt::plain_act(&e); let mut n = json!({"id":id,"kind":"note","text":a["text"],"label":a["label"],"tone":a["tone"],"at":at}); if a.get("copy").is_some() { n["copy"] = a["copy"].clone() }
+            // a thought: the phone draws it folded to its first line and opens it with a tap (docs/PHONE-DATA.md, Fold)
+            if a["folds"] == true { n["folds"] = json!(true) } n }
     })
 }
 /// What of a message there is to copy (feature `copy`, md/copy.rs `spans`): `copy: [{text, cmd}]`, each fenced block and each inline code span with a
