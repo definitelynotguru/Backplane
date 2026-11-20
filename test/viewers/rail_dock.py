@@ -444,16 +444,14 @@ def build_task4_dock_steps(settle_timeout_ms: int = 15000, route: str = "shift")
 def build_b7_steps(settle_timeout_ms: int = 15000) -> list[dict]:
     """Rule B7 (one split and compare model) steps on `full`, all through the UI controls.
 
-    Idle reset before every trial (never `rail:Board` on a focused Board). Tiles and the splitter are selectors the client resolves
+    Each direction starts on the Board left by the preceding close or refusal. Tiles and the splitter are selectors the client resolves
     from the drawn inventory; the drag is a pointer drag on that splitter (`ok` only if one was dispatched).
     """
     tmo = min(settle_timeout_ms, 8000)
     minimum = (os.environ.get("RAIL_WINDOW_SIZE") or os.environ.get("RAIL_B2_SIZE")) == "minimum"
-    steps: list[dict] = []
+    steps = _reset_idle("b7-add-right-idle", tmo) + [{"press": "rail:Board"}]
     for side in ("right", "left", "bottom", "top"):
-        steps += _reset_idle(f"b7-add-{side}-idle", tmo)
         steps += [
-            {"press": "rail:Board"},
             {"shot": f"b7-add-{side}-start", "settle": "board", "timeout_ms": tmo},
             {"mark": f"b7:add-{side}"},
             *_add_beside("kind=board", "schematic", side),
@@ -463,9 +461,7 @@ def build_b7_steps(settle_timeout_ms: int = 15000) -> list[dict]:
             {"wait": 250},
             {"shot": f"b7-close-{side}", "settle": "board", "timeout_ms": tmo},
         ]
-    steps += _reset_idle("b7-pair-idle", tmo)
     steps += [
-        {"press": "rail:Board"},
         {"wait_settled": "board", "tag": "b7-pair-start", "timeout_ms": tmo},
         {"mark": "b7:pair"},
         *_add_beside("kind=board", "schematic"),

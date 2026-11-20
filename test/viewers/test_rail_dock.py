@@ -133,14 +133,12 @@ class RailDockHarnessTests(unittest.TestCase):
                 self.assertNotRegex(v, r"^(tile-close|tile-splitter|splitter):", s)
         drag = next(s for s in t4_steps if "drag" in s)
         self.assertEqual(drag["drag"]["splitter"], "@splitter[axis=x]")
-        # Between direction trials, idle reset occurs before pressing rail:Board
-        idx_left_idle = next(i for i, s in enumerate(t4_steps) if s.get("tag") == "b7-add-left-idle")
-        self.assertEqual(t4_steps[idx_left_idle + 1].get("press"), "rail:Board")
-        # and rail:Board is never pressed twice without an idle reset between
-        first_dock = next(i for i, s in enumerate(t4_steps) if s.get("mark") == "press:task4-dock-gerbers")
-        board_presses = [i for i, s in enumerate(t4_steps) if s.get("press") == "rail:Board" and i > first_dock]
-        for i in board_presses:
-            self.assertTrue(any(t4_steps[j].get("keys") == "escape" for j in range(i - 6, i)), i)
+        # Each close/refusal leaves Board visible. A second Board press would close it.
+        start = next(i for i,s in enumerate(t4_steps) if s.get("tag") == "b7-add-right-idle")
+        end = next(i for i,s in enumerate(t4_steps) if s.get("mark") == "b7:pair")
+        self.assertEqual([s["press"] for s in t4_steps[start:end] if s.get("press") == "rail:Board"], ["rail:Board"])
+        for side in ("right", "left", "bottom", "top"):
+            self.assertIn({"mark": f"b7:add-{side}"}, t4_steps[start:end])
         # the other kinds are still scheduled (the elif chain around the dock block stayed intact)
         self.assertTrue(D.build_script("schematic-only", 300, 15000, embed=True))
         self.assertFalse([s for s in D.build_script("mech-only", 300, 15000) if "mark" in s and str(s["mark"]).startswith("b7:")])
