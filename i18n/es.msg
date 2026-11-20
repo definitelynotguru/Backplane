@@ -4711,3 +4711,7 @@ viewer.layout.refusal.unknownframe = Marco de KiCad desconocido
 viewer.layout.refusal.invalidinput = Solicitud de diseño no válida
 viewer.layout.refusal.toomany = Demasiados mosaicos abiertos
 viewer.layout.refusal.toomanysources = Demasiadas fuentes en un diseño
+viewer.tile.add = Añadir al lado
+viewer.tile.focus = Enfocar panel
+viewer.tile.embedded = Vuelve al visor para añadir un panel al lado.
+viewer.tile.simulation.single = Cierra los demás paneles para abrir Simulación en KiCad.

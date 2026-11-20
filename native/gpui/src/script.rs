@@ -22,7 +22,7 @@ thread_local! { static DRAG_HOOK: std::cell::RefCell<Option<SplitterDrag>> = con
 pub fn tiles_metric(started: Instant, tiles: Vec<Value>, splitters: Vec<Value>) {
     TILES.with_borrow_mut(|last| {
         if last.0 != tiles || last.1 != splitters {
-            metric(started, "tiles", json!({"tiles": tiles, "splitters": splitters}));
+            metric(started, "tiles", json!({"tiles": tiles, "splitters": splitters, "refusal_metric":true}));
             *last = (tiles, splitters);
         }
     });
@@ -104,7 +104,8 @@ thread_local! {
     static HEADER: RefCell<HeaderRegistry> = RefCell::default();
 }
 
-fn header_alias(id: &str) -> Option<&'static str> {
+fn header_alias(id: &str) -> Option<&str> {
+    if id.starts_with("tile:") || id.starts_with("add-beside:") { return Some(id); }
     // i18n-ok: stable script control IDs
     Some(match id {
         "kicad-edit" => "ui:Edit",
@@ -220,6 +221,68 @@ fn rail_row_state(viewer: &Value, want: &str) -> Option<&'static str> {
     }
 }
 
+type DrawnRects = std::collections::HashMap<String, [f32; 4]>;
+
+fn measured_rect(rects: &DrawnRects, name: String) -> Option<Value> {
+    let &[x, y, w, h] = rects.get(&name)?;
+    (w > 0. && h > 0.).then(|| json!({"x":x,"y":y,"w":w,"h":h}))
+}
+
+// Switching source/overlay replaces a tile's renderer and resets its local
+// counter. Accumulate the actual increments across renderer replacements.
+#[derive(Default)]
+struct TilePaints {
+    slot: Option<usize>,
+    previous: u64,
+    total: u64,
+}
+
+impl TilePaints {
+    fn observe(&mut self, slot: Option<usize>, count: u64) -> u64 {
+        let previous = if slot == self.slot && count >= self.previous { self.previous } else { 0 };
+        self.total += count - previous;
+        self.previous = count;
+        self.slot = slot;
+        self.total
+    }
+}
+
+thread_local! {
+    static TILE_PAINTS: RefCell<(String, BTreeMap<String, TilePaints>)> = RefCell::new(Default::default());
+}
+
+// Walk in layout order so the metric stays stable. Only the current paint can
+// supply geometry or a frame counter. A maximized sibling has neither.
+fn dock_inventory(layout: &Value, rects: &DrawnRects, mut frame_count: impl FnMut(&str, &str) -> u64) -> (Vec<Value>, Vec<Value>) {
+    let mut tiles = Vec::new();
+    let mut splitters = Vec::new();
+    let mut todo = vec![&layout["root"]];
+    while let Some(node) = todo.pop() {
+        let Some(id) = node["id"].as_str() else { continue };
+        match node["type"].as_str() {
+            Some("split") => {
+                todo.extend([&node["b"], &node["a"]]);
+                let axis = match node["axis"].as_str() {
+                    Some("row") => "x", Some("col") => "y", _ => continue,
+                };
+                if let Some(rect) = measured_rect(rects, format!("splitter:{id}")) {
+                    splitters.push(json!({"id":id,"rect":rect,"axis":axis}));
+                }
+            }
+            Some("tile") => {
+                let Some(rect) = measured_rect(rects, format!("tile:{id}")) else { continue };
+                let Some(body) = measured_rect(rects, format!("tile-body:{id}")) else { continue };
+                let frame = frame_count(id, node["kind"].as_str().unwrap_or(""));
+                tiles.push(json!({"id":id,"kind":node["kind"],"source":node["source"],
+                    "overlay":node["overlay"],"focused":layout["focus"] == id,
+                    "rect":rect,"body":body,"frame":frame}));
+            }
+            _ => {}
+        }
+    }
+    (tiles, splitters)
+}
+
 fn tile_inventory(kind: &str, picked: Option<usize>, rects: &std::collections::HashMap<String, [f32; 4]>) -> Value {
     let rect = |r: &[f32; 4]| json!({"x":r[0],"y":r[1],"w":r[2],"h":r[3]});
     let mut tiles = Vec::new();
@@ -260,33 +323,63 @@ impl Backplane {
             if snap != self.last_layout { self.last_layout = snap.clone(); metric(started, "layout", json!({"rects": serde_json::from_str::<Value>(&snap).unwrap_or(Value::Null)})); }
             // G4: the controls on screen, on change
             let rects = crate::art::ctl_rects();
-            let kind = rects.keys().find_map(|k| k.strip_prefix("tile-page:")).unwrap_or("");
-            let inventory = tile_inventory(kind, self.screens.pick_slot, &rects);
-            let mut tiles = inventory["tiles"].as_array().unwrap().clone();
-            let facts = &self.data["thread"]["viewer"]["identity"];
-            tiles.retain_mut(|tile| {
-                let id = tile["id"].as_str().unwrap();
-                let page = tile["kind"].as_str().unwrap();
-                let Some([x,y,w,h]) = rects.get(&format!("tile-body:{id}")) else { return false };
-                let identity = if facts["page"] != kind { &Value::Null }
-                    else if kind == "split" { facts["panes"].as_array().and_then(|p| p.iter().find(|p| p["page"] == page)).unwrap_or(&Value::Null) }
-                    else { facts };
-                let source = ["rel","name"].iter().find_map(|k| identity["source"][k].as_str().filter(|v| !v.is_empty())).unwrap_or("");
-                let frame = match page {
-                    "board" | "schematic" | "gerbers" => self.screens.plots[match id { "sch" => 1, "pcb" => 2, _ => 0 }].presented,
-                    "3d" | "mech" => self.screens.active_solid().map_or(0, |s| s.read(cx).painted_count()),
-                    _ => 0,
-                };
-                tile["frame"] = frame.into();
-                tile["body"] = json!({"x":x,"y":y,"w":w,"h":h});
-                tile["source"] = source.into();
-                tile["overlay"] = Value::Null;
-                true
-            });
-            tiles_metric(started, tiles, inventory["splitters"].as_array().unwrap().clone());
+            let layout = &self.data["thread"]["viewer"]["layout"];
+            let (tiles, splitters) = if layout["root"]["type"] == "split"
+                && !rects.contains_key("tile-page:split") {
+                let picture = &self.data["thread"]["viewer"]["tiles"];
+                TILE_PAINTS.with_borrow_mut(|(owner, counts)| {
+                    if owner != &self.selected {
+                        counts.clear();
+                        owner.clone_from(&self.selected);
+                    }
+                    counts.retain(|id, _| picture.get(id.as_str()).is_some());
+                    dock_inventory(layout, &rects, |id, kind| {
+                        let paints = counts.entry(id.to_owned()).or_default();
+                        let count = match kind {
+                            "board" | "schematic" | "gerbers" | "mech" | "3d" => self.screens.tile_presented(id, cx),
+                            // For non-canvas pages, the body probe itself painted this frame.
+                            _ => { paints.total += 1; return paints.total; }
+                        };
+                        paints.observe(self.screens.plots.tile_slot(id), count)
+                    })
+                })
+            } else {
+                let kind = rects.keys().find_map(|k| k.strip_prefix("tile-page:")).unwrap_or("");
+                let inventory = tile_inventory(kind, self.screens.pick_slot, &rects);
+                let mut tiles = inventory["tiles"].as_array().unwrap().clone();
+                let facts = &self.data["thread"]["viewer"]["identity"];
+                tiles.retain_mut(|tile| {
+                    let id = tile["id"].as_str().unwrap();
+                    let page = tile["kind"].as_str().unwrap();
+                    let Some([x,y,w,h]) = rects.get(&format!("tile-body:{id}")) else { return false };
+                    let identity = if facts["page"] != kind { &Value::Null }
+                        else if kind == "split" { facts["panes"].as_array().and_then(|p| p.iter().find(|p| p["page"] == page)).unwrap_or(&Value::Null) }
+                        else { facts };
+                    let source = ["rel","name"].iter().find_map(|k| identity["source"][k].as_str().filter(|v| !v.is_empty())).unwrap_or("");
+                    let frame = match page {
+                        "board" | "schematic" | "gerbers" => self.screens.plots[match id { "sch" => 1, "pcb" => 2, _ => 0 }].presented,
+                        "3d" | "mech" => self.screens.active_solid().map_or(0, |s| s.read(cx).painted_count()),
+                        _ => 0,
+                    };
+                    let single = id == "main" && layout["root"]["type"] == "tile" && layout["root"]["kind"] == page;
+                    tile["frame"] = frame.into();
+                    tile["body"] = json!({"x":x,"y":y,"w":w,"h":h});
+                    tile["source"] = source.into();
+                    let leaf = &layout["root"];
+                    if single {
+                        tile["id"] = leaf["id"].clone();
+                        tile["overlay"] = leaf["overlay"].clone();
+                    } else {
+                        tile["overlay"] = Value::Null;
+                    }
+                    true
+                });
+                (tiles, inventory["splitters"].as_array().unwrap().clone())
+            };
+            tiles_metric(started, tiles, splitters);
             let ctl = HEADER.with_borrow(|registry| {
                 let inventory = |id: &str, label: &str, rect_id: &str, enabled: bool, folded: bool| {
-                    json!({"id": id, "label": label, "rect": rects.get(rect_id).map(|r| json!({"x": r[0], "y": r[1], "w": r[2], "h": r[3]})),
+                    json!({"id": id, "label": label, "rect": rects.get(rect_id).or_else(|| rects.get(id)).map(|r| json!({"x": r[0], "y": r[1], "w": r[2], "h": r[3]})),
                         "enabled": enabled, "visible": true, "wired": enabled, "disabled_look": !enabled, "folded": folded})
                 };
                 self.all_controls().filter(|c| !registry.replaces(&c.id))
@@ -337,7 +430,7 @@ impl Backplane {
             if crate::art::rects_on() {
                 let handle = window.window_handle();
                 set_splitter_drag(Box::new(move |_, from, to, moves, cx| {
-                    if !(1..=120).contains(&moves) { return false }
+                    if from == to || !(1..=120).contains(&moves) { return false }
                     handle.update(cx, |_, window, cx| {
                         let drag = Drag { to, moves: moves as usize };
                         for event in drag.events(from, window.scale_factor()) { window.dispatch_event(event, cx); }
@@ -723,7 +816,7 @@ impl Backplane {
                 let (tiles, splitters) = TILES.with(|t| t.borrow().clone());
                 let want = spec["splitter"].as_str().unwrap_or("");
                 let id = if want.starts_with('@') { resolve_selector(want, &tiles, &splitters) } else { Ok(want.to_string()) };
-                let moves = spec["moves"].as_u64().unwrap_or(6) as u32;
+                let moves = u32::try_from(spec["moves"].as_u64().unwrap_or(6)).unwrap_or(0);
                 let report = match id {
                     Err(e) => json!({"ok": false, "splitter": want, "error": e}),
                     Ok(id) => match splitters.iter().find(|s| s["id"] == id.as_str()) {
@@ -865,7 +958,7 @@ impl Backplane {
                     PRESS_SOLID.with(|c| *c.borrow_mut() = (sr.key().to_string(), sr.painted_count()));
                 }
                 let found = self.find_script_control(&id);
-                let action = found.map(|e| self.do_click(&e.ctl, cx));
+                let action = found.filter(|e| !matches!(e.ctl, Ctl::None)).map(|e| self.do_click(&e.ctl, cx));
                 self.m("press", json!({"id": id, "selector": if sel != id { json!(sel) } else { Value::Null }, "found": action.is_some(), "action": action}));
                 self.ui_epoch += 1;
                 cx.notify();
@@ -1039,6 +1132,12 @@ impl Backplane {
         let th = &self.data["thread"];
         let v = &th["viewer"];
         if let Some(st) = rail_row_state(v, want) { return Some(st); }
+        if v["splitLimits"].is_object() && matches!(want, "files" | "review" | "diff" | "browser") {
+            let id = v["layout"]["focus"].as_str()?;
+            let row = &v["tiles"][id];
+            if row["kind"] != want || !crate::art::ctl_rects().contains_key(&format!("tile-body:{id}")) { return None; }
+            return crate::screens::tile_pages::settled(&self.screens, th, row, cx);
+        }
         let diff_on = th["diff"].is_object();
         let open = v["open"].as_str().unwrap_or("");
         let active = if diff_on { "diff".to_string() } else { crate::screens::viewer::active_kind(v, None) };
@@ -1226,6 +1325,39 @@ mod tests {
         let p = crate::tmp::file("script", "d.json");
         std::fs::write(&p, r#"[{"drag":{"splitter":"@splitter","dx":-80}}]"#).unwrap();
         assert!(matches!(&load(&p)[0], Step::Drag(_)));
+    }
+    #[test]
+    fn tile_sequence_survives_canvas_replacement() {
+        let mut paints = TilePaints::default();
+        assert_eq!(paints.observe(Some(3), 8), 8);
+        assert_eq!(paints.observe(Some(3), 8), 8);
+        assert_eq!(paints.observe(Some(4), 1), 9);
+        assert_eq!(paints.observe(Some(4), 4), 12);
+    }
+    #[test]
+    fn dock_inventory_joins_only_painted_leaves_to_their_own_frames() {
+        let layout = json!({"focus":"right","root":{"type":"split","id":"bar","axis":"row",
+            "a":{"type":"tile","id":"left","kind":"board","source":"a","overlay":{"kind":"gerbers"}},
+            "b":{"type":"tile","id":"right","kind":"board","source":"b"}}});
+        let mut rects: DrawnRects = [
+            ("tile:left",[0.,0.,200.,150.]), ("tile-body:left",[0.,25.,200.,125.]),
+            ("splitter:bar",[200.,0.,6.,150.]), ("tile:right",[206.,0.,180.,150.]),
+            ("tile-body:right",[206.,20.,180.,130.]),
+        ].map(|(k, r)| (k.to_owned(), r)).into_iter().collect();
+        let count = |id: &str, _: &str| if id == "left" { 13 } else { 2 };
+        let (tiles, splitters) = dock_inventory(&layout, &rects, count);
+        assert_eq!(tiles[0]["frame"], 13);
+        assert_eq!(tiles[0]["overlay"]["kind"], "gerbers");
+        assert_eq!(tiles[1]["frame"], 2);
+        assert_eq!(tiles[1]["focused"], true);
+        assert_eq!(tiles[1]["body"]["y"], 20.0);
+        assert_eq!(splitters[0]["axis"], "x");
+        rects.remove("tile-body:left");
+        rects.remove("splitter:bar");
+        let (tiles, splitters) = dock_inventory(&layout, &rects, count);
+        assert_eq!(tiles.len(), 1);
+        assert_eq!(tiles[0]["id"], "right");
+        assert!(splitters.is_empty());
     }
     #[test]
     fn inventory_tracks_visible_split_slots_and_their_painted_divider() {

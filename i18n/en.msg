@@ -4712,3 +4712,7 @@ viewer.layout.refusal.unknownframe = Unknown KiCad frame
 viewer.layout.refusal.invalidinput = Invalid layout request
 viewer.layout.refusal.toomany = Too many tiles open
 viewer.layout.refusal.toomanysources = Too many sources in one layout
+viewer.tile.add = Add beside
+viewer.tile.focus = Focus tile
+viewer.tile.embedded = Return to the viewer to add a tile beside this one.
+viewer.tile.simulation.single = Close the other tiles to open Simulation in KiCad.

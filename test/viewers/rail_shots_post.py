@@ -2239,6 +2239,12 @@ def main(argv: list[str] | None = None) -> int:
 
         kind_embed = embed
         expected = M.expected_shots(kind, embed=kind_embed)
+        if kind == "full":
+            # Inspect docking shots by the same rules as the original manifest.
+            # Older runs of this schema may predate those script steps.
+            dock_steps = DOCK.build_task4_dock_steps() + DOCK.build_b7_steps()
+            expected.extend(step["shot"] for step in dock_steps
+                            if "shot" in step and step["shot"] in caps and step["shot"] not in expected)
         missing: list[str] = []
         failed_caps: list[str] = []
         obstructions_found: dict[str, list[dict]] = {}

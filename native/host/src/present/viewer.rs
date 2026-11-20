@@ -1201,8 +1201,31 @@ pub fn viewer_json(st: &State, template: &Value, session: &Value) -> Option<Valu
         }
         v["showToken"] = json!(true); // this hub answers an agent show's token (`view-show`): a desktop without it sends plain `view`
         v["layout"] = serde_json::to_value(&active_layout).unwrap_or(Value::Null);
+        if let Some(root @ super::layout::Node::Split { .. }) = active_layout.root.as_ref().filter(|_| had_stored_layout) {
+            // Supply the same child minima used by layout-resize for a local pointer preview.
+            let mut limits = serde_json::Map::new();
+            split_limits(root, &mut limits);
+            v["splitLimits"] = Value::Object(limits);
+        }
         let src_ref = local.then_some(&*sources);
         v["tiles"] = build_tiles_picture(&active_layout, eff_root, &v, drafts, src_ref, &shown, linked);
+        if had_stored_layout {
+            for tile in active_layout.tiles() {
+                let row = &mut v["tiles"][&tile.id];
+                match tile.kind {
+                    super::layout::PageKind::Files => {
+                        let mut listing = files_page(st, eff_root, sel, &tile.source);
+                        listing["dir"] = json!(tile.source);
+                        row["files"] = listing;
+                    }
+                    super::layout::PageKind::Review => {
+                        row["review"] = pages::tile_review(session, sel, &tile.source);
+                    }
+                    super::layout::PageKind::Diff => { row["diff"] = pages::tile_diff(session, sel); }
+                    _ => {}
+                }
+            }
+        }
         // If a stored layout's focused tile is versioned/unresolved, never let top-level legacy `key`/`layers`
         // fall back to live default artwork or expose `.git`/repo paths.
         if had_stored_layout {
@@ -2328,6 +2351,16 @@ fn tile_identity(
     id
 }
 
+fn split_limits(node: &super::layout::Node, limits: &mut serde_json::Map<String, Value>) {
+    use super::layout::{default_min_for, subtree_min, Node};
+    if let Node::Split { id, a, b, .. } = node {
+        let minimum = default_min_for(None);
+        limits.insert(id.clone(), json!([subtree_min(a, &minimum), subtree_min(b, &minimum)]));
+        split_limits(a, limits);
+        split_limits(b, limits);
+    }
+}
+
 /// Build `viewer.tiles`: per-tile map keyed by `TileId` carrying today's page values plus `identity`
 /// (from `viewer_identity::identity`).
 ///
@@ -3173,6 +3206,19 @@ fn viewer_page<'a>(st: &State, template: &Value, session: &Value, root: &str, so
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn split_limits_follow_the_hub_minimum_at_the_stored_ratio() {
+        let leaf = |id| json!({"type":"tile","id":id,"kind":"board"});
+        let node = serde_json::from_value(json!({"type":"split","id":"outer","axis":"row","ratio":0.5,
+            "a":leaf("left"), "b":{"type":"split","id":"inner","axis":"col","ratio":0.25,
+            "a":leaf("top"), "b":leaf("bottom")}})).unwrap();
+        let mut limits = serde_json::Map::new();
+        split_limits(&node,&mut limits);
+        let m = super::super::layout::MIN_TILE_PX;
+        assert_eq!(limits["outer"],json!([[m,m],[m,m*4.]]));
+        assert_eq!(limits["inner"],json!([[m,m],[m,m]]));
+    }
+
     fn fx() -> Value { serde_json::from_str(include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/../../test/slim/fixtures/panel.json"))).unwrap() }
     fn state() -> (State, String) {
         let mut st = State::new();

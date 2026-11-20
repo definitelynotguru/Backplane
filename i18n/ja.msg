@@ -4735,3 +4735,7 @@ viewer.layout.refusal.unknownframe = 不明な KiCad フレームです
 viewer.layout.refusal.invalidinput = 無効なレイアウト要求です
 viewer.layout.refusal.toomany = タイルが多すぎます
 viewer.layout.refusal.toomanysources = レイアウトのソースが多すぎます
+viewer.tile.add = 隣に追加
+viewer.tile.focus = タイルを選択
+viewer.tile.embedded = 隣にタイルを追加するにはビューアーに戻ってください。
+viewer.tile.simulation.single = ほかのタイルを閉じると、KiCad でシミュレーションを開けます。

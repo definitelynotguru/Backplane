@@ -195,10 +195,13 @@ impl Backplane {
             // holds something: the Add project dialog opens on it, where Add takes it as it is
             Event::Data(tag,v) if tag=="project-made" => { let now=self.input.read(cx).content.to_string(); if screens::sidebox::makes_project(&now) { self.input.update(cx,|i,cx|i.set(String::new(),cx)); self.drafts.remove(&self.selected); self.screens.drafts.set(&self.selected,""); let _=self.tx.try_send(Command::Draft(String::new())); } if let Some(n)=v.as_str().filter(|n|!n.is_empty()) { self.note=crate::i18n::trs(n); } cx.notify(); }
             Event::Data(tag,v) if tag=="project-exists" => { self.arm_new=None; if let Some(d)=v.as_str() { let _=self.tx.try_send(Command::Action("proj-exists".into(),d.to_string())); } cx.notify(); }
+            Event::Data(tag, v) if tag == "dock-probe" => screens::plotview::dock_probe_reply(self, &v),
+            Event::Data(tag, v) if tag == "dock-watch" => self.dock_watch(&v, cx),
             Event::Data(tag,v) if tag==streamer::TAG => self.streamer_ids(&v,cx),
             Event::Data(tag,v) if tag=="names" => { screens::xprobe::got_names(self,&v); cx.notify(); }
             Event::Data(tag,v) if tag=="xsel" => { screens::xprobe::got_select(self,&v); cx.notify(); }
             Event::Data(tag,v) if tag=="xsel-tap" => { eprintln!("GPUI_LOG {}",serde_json::json!({"event":"xprobe_tap","ok":v["ok"],"kicad":v["kicad"],"found":v["found"],"error":v["error"]})); }
+            Event::Data("layout-refusal", v) => screens::tile_menu::refused(self, &v, cx),
             Event::Data(tag,v)=>if tag=="google-changed" {screens::google::changed(self)} else if tag=="google" {screens::google::got(self,v,cx)} else if tag=="acct-moveall" {screens::accounts::moved(self,&v)} else {screens::accounts::got(self,v,cx)},
             Event::Voice(f)=>self.voice_frame(f,cx),
             Event::Rpc("voice",ok,why)=>{if !ok{self.error=why;}},

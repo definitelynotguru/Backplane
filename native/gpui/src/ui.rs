@@ -731,11 +731,16 @@ impl Backplane {
         let update = if self.screens.kicad.is_some() { crate::screens::kicad_update::view(self, cx) } else { None };
         self.screens.plots[0].loading.begin_frame(self.data["thread"]["id"].as_str().unwrap_or(""));
         let review_panel = crate::screens::mgmt::review_panel(self, cx);
-        let thread = &self.data["thread"];
-        let editor = self.kicad_for(thread, cx);
-        let solid = self.screens.active_solid().cloned();
-        let (pv, split) = self.screens.plots.views();
-        let el = crate::screens::viewer::page(cx, &reg, light, &self.screens.files, &self.screens.images, self.screens.attacher.target.as_ref(), thread, &self.screens.plot, pv, split, solid.as_ref(), self.screens.browser.as_ref().map(|(_, b)| b), editor.as_ref(), update, review_panel, &self.screens.mgmt.checks);
+        let docked = self.data["thread"]["viewer"]["splitLimits"].is_object();
+        let el = if docked {
+            crate::screens::tiles::page(self, cx, light, review_panel)
+        } else {
+            let thread = &self.data["thread"];
+            let editor = self.kicad_for(thread, cx);
+            let solid = self.screens.active_solid().cloned();
+            let (pv, split) = self.screens.plots.views();
+            crate::screens::viewer::page(cx, &reg, light, &self.screens.files, &self.screens.images, self.screens.attacher.target.as_ref(), thread, &self.screens.plot, pv, split, solid.as_ref(), self.screens.browser.as_ref().map(|(_, b)| b), editor.as_ref(), update, review_panel, &self.screens.mgmt.checks, &self.screens.tile_menu)
+        };
         { let rows = &self.data["thread"]["entries"]; reg.borrow_mut().resolve_by(|id| rows.as_array().and_then(|r| r.iter().position(|e| e["id"].as_str() == Some(id)))); }
         // full screen: the editor alone, without the management panels' strip under it
         let el = if crate::screens::viewer::KICAD_SCREEN.load(std::sync::atomic::Ordering::Relaxed) { el }
@@ -795,9 +800,15 @@ impl Render for Backplane {
         for page in self.screens.retired_solids.drain(..) { page.update(cx, |p, _| p.release(window)); }
         let back = self.local.viewer_backdrop(self.light()); back.make_current();
         if let Some(s) = self.screens.active_solid().cloned() { let (part, split) = (crate::screens::plotview::probed_part(self), self.data["thread"]["viewer"]["open"] == "split"); s.update(cx, |p, _| { p.set_backdrop(back); p.set_probe(&part); p.names_probe = !split; }); }
+        if self.data["thread"]["viewer"]["splitLimits"].is_object() {
+            let part = crate::screens::plotview::probed_part(self);
+            for page in self.screens.tile_solids() {
+                page.update(cx, |p, _| { p.set_backdrop(back); p.set_probe(&part); p.collect(window); });
+            }
+        }
         for (slot, page) in &self.screens.solids {
             if page.read(cx).atlas_images() > 0 {
-                let shown = self.screens.solid_slot.as_ref().is_some_and(|active| active == slot)
+                let shown = self.screens.plots.watches(slot) || self.screens.solid_slot.as_ref().is_some_and(|active| active == slot)
                     && crate::screens::viewer::shows_solid(&self.data["thread"]);
                 page.update(cx, |p, _| { if !shown { p.put_away(); } p.collect(window); });
             }
@@ -834,16 +845,17 @@ impl Render for Backplane {
         if crate::screens::viewer::fit(win_w, self.local.sidebar_px as f32, self.sidebar_open, false, viewer_open).0 { self.screens.side_force = false; } // room again: "anyway" is over
         let (side_shown, thread_least, pane_least, share) = crate::screens::viewer::fit(win_w, self.local.sidebar_px as f32, self.sidebar_open, self.screens.side_force, viewer_open);
         // the embedded editor at full size: the sidebar folds and the thread gives all its room (screens/viewer.rs pane)
-        let kedit = viewer_open && self.screens.kicad.is_some() && self.screens.kicad_window.is_none() && matches!(thread["viewer"]["open"].as_str(), Some("board" | "schematic" | "3d"));
+        let docked = thread["viewer"]["splitLimits"].is_object();
+        let kedit = !docked && viewer_open && self.screens.kicad.is_some() && self.screens.kicad_window.is_none() && matches!(thread["viewer"]["open"].as_str(), Some("board" | "schematic" | "3d"));
         // full screen: the editor and its strip are the whole window (no top bar, sidebar, thread, rail or pane bar)
         if !kedit { self.screens.kicad_screen = false; } // the editor left the pane: the next Edit starts in the pane, not over the window
         let kscreen = self.screens.kicad_screen && kedit;
-        let kfull = kscreen || (self.screens.kicad_full && viewer_open && self.screens.kicad.is_some() && matches!(thread["viewer"]["open"].as_str(), Some("board" | "schematic" | "3d")));
+        let kfull = kscreen || (!docked && self.screens.kicad_full && viewer_open && self.screens.kicad.is_some() && matches!(thread["viewer"]["open"].as_str(), Some("board" | "schematic" | "3d")));
         crate::screens::viewer::KICAD_SCREEN.store(kscreen, std::sync::atomic::Ordering::Relaxed);
         // whether the page holds the embedded editor this frame (popped out: its own window does), from this frame's state: macOS hides
         // KiCad's frame by it when the pane is not drawn (#1199: the viewer closed, the PCB Editor stayed on screen)
         if let Some(p) = self.screens.kicad.clone() {
-            let in_page = self.screens.kicad_window.is_some() || (self.kicad_for(thread, cx).is_some() && crate::screens::viewer::holds_editor(thread));
+            let in_page = self.screens.kicad_window.is_some() || (!docked && self.kicad_for(thread, cx).is_some() && crate::screens::viewer::holds_editor(thread));
             if p.read(cx).in_page != in_page { p.update(cx, |p, _| p.in_page = in_page); }
         }
         // Follow agent in KiCad: the hub learns whether this thread's page holds KiCad and which frame it shows (viewer.state, on change)

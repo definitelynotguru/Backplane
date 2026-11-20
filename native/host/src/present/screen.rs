@@ -743,7 +743,10 @@ pub fn recent_unified(st: &State,far: &[(String,&State)],un: &Unified,p: &Value)
                     cmds = [read_cmds.clone(), o.before].concat();
                 }
                 Some(super::viewer::LayoutOut::Refused { code, key, text }) => {
-                    cmds.push(json!({"type":"say","tone":"note","code":code,"key":key,"text":text}));
+                    let payload = serde_json::from_str::<Value>(value).unwrap_or_default();
+                    let tile = ["tile", "target", "base", "a"].iter().find_map(|k| payload[*k].as_str());
+                    cmds.push(json!({"type":"say","tone":"note","code":code,"key":key,"text":text,
+                        "thread":session["sel"], "tile":tile}));
                 }
                 None => return refused("action.layout-unported"),
             }

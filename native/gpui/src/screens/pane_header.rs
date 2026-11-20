@@ -16,6 +16,7 @@ pub struct Controls {
 }
 
 pub struct Identity {
+    pub(super) grip: Option<AnyElement>,
     page: String,
     label: String,
     rel: String,
@@ -25,6 +26,13 @@ pub struct Identity {
 }
 
 impl Identity {
+    pub(super) fn refusal(&mut self, message: &str) {
+        self.label = message.to_owned();
+        self.rel.clear();
+        self.name.clear();
+        self.version.clear();
+    }
+
     pub fn new(page: &str, facts: &Value) -> Self {
         let field = |v: &Value, k: &str| v[k].as_str().unwrap_or_default().to_owned();
         let fallback_key = match page {
@@ -58,7 +66,7 @@ impl Identity {
                 Some([trs(pane["label"].as_str()?).as_str(), source].join(" · "))
             }).collect::<Vec<_>>().join("\n");
         }
-        Self { page: page.into(), label, rel, name, version, detail }
+        Self { grip: None, page: page.into(), label, rel, name, version, detail }
     }
 
     pub fn with_set_note(mut self, note: &str) -> Self {
@@ -85,6 +93,7 @@ pub enum Press {
     Fit(usize),
     GerbView(Vec<String>),
     Split(&'static str),
+    Tile(super::tile_menu::Action),
     FocusProbe,
     ClearProbe,
 }
@@ -109,6 +118,7 @@ impl Press {
             }
             Self::GerbView(files) => this.open_in_gerbview(files.clone(), cx),
             Self::Split(pane) => viewer::toggle_split(this, pane, cx),
+            Self::Tile(action) => action.run(this, cx),
             Self::FocusProbe => {
                 for i in [1, 2] { super::plotview::bring_into_view(this, i); }
                 cx.notify();
@@ -261,25 +271,28 @@ fn measured(mut el: AnyElement, w: &mut Window, cx: &mut App) -> (f32, AnyElemen
     (sz.width.into(), slot.into_any_element())
 }
 
-pub fn pane_header(light: bool, identity: Identity, tools: Vec<PaneTool<ToolAction>>, controls: Controls) -> AnyElement {
+pub fn pane_header(light: bool, mut identity: Identity, tools: Vec<PaneTool<ToolAction>>, controls: Controls) -> AnyElement {
     let page = identity.page.clone();
     let identity_page = page.clone();
     let c = move |n: &str| theme::color(light, n);
     let inner = canvas(move |bounds, w, cx| {
-        let state = w.use_keyed_state(SharedString::from(format!("pane-menu-{page}")), cx, |_, cx| {
+        let scope = controls.tools.iter().find_map(|tool| tool.id.strip_suffix(":add-beside")).unwrap_or(&page);
+        let state = w.use_keyed_state(SharedString::from(format!("pane-menu-{scope}")), cx, |_, cx| {
             (None::<usize>, cx.focus_handle().tab_stop(true), std::rc::Rc::new(std::cell::Cell::new(Bounds::<Pixels>::default())))
         });
         let (selected, focus, trigger_rect) = state.read(cx).clone();
         let gap = 4.;
         let more = f32::from(crate::scale::tpx(super::head::BTN_H));
         let (close_width, close) = measured(controls.close, w, cx);
+        let grip = identity.grip.take().map(|el| measured(el, w, cx));
+        let grip_room = grip.as_ref().map_or(0., |(width, _)| width + gap);
         let path = if identity.rel.is_empty() { &identity.name } else { &identity.rel };
         let basename = path.rsplit(['/', '\\']).next().unwrap_or(path);
         let full = identity.text(path);
         let short = if path == basename { full.clone() } else { identity.text(&format!("…/{basename}")) };
         let measure = |s: &str| f32::from(w.text_system().shape_line(s.to_owned().into(), crate::scale::tpx(12.), &[w.text_style().to_run(s.len())], None).width).ceil();
         let title_min = measure(&short).min(f32::from(crate::scale::tpx(150.)));
-        let room = f32::from(bounds.size.width);
+        let room = f32::from(bounds.size.width) - grip_room;
         let mut widths = vec![];
         let mut items = vec![];
         crate::script::header_present();
@@ -299,10 +312,18 @@ pub fn pane_header(light: bool, identity: Identity, tools: Vec<PaneTool<ToolActi
             widths.push((priority(&id, i >= page_count), width + gap));
             items.push((id, label, tool.active, inline, action, tool.action.popup));
         }
-        let visible = layout(room - close_width - gap - title_min, more + gap, &widths);
+        // Add beside lives in More. Keep the resting layout of all existing tools.
+        let has_add = items.last().is_some_and(|item| item.0.ends_with(":add-beside"));
+        let legacy = widths.len() - usize::from(has_add);
+        let mut visible = layout(room - close_width - gap - title_min, more + gap, &widths[..legacy]);
+        let hover_more = has_add && grip.is_none() && visible.iter().all(|v| *v);
+        if has_add && !hover_more {
+            visible = layout(room - close_width - gap - title_min - more - gap, 0., &widths[..legacy]);
+        }
+        if has_add { visible.push(false); }
         let folded = visible.iter().any(|&v| !v);
         let title_room = room - close_width - gap - widths.iter().zip(&visible).filter(|(_, v)| **v).map(|(i, _)| i.1).sum::<f32>()
-            - if folded { more + gap } else { 0. };
+            - if folded && !hover_more { more + gap } else { 0. };
         let measure = |s: &str| f32::from(w.text_system().shape_line(s.to_owned().into(), crate::scale::tpx(12.), &[w.text_style().to_run(s.len())], None).width).ceil();
         let text = if measure(&full) <= title_room { full.clone() } else if measure(&short) <= title_room { short }
             else { shorten(&identity, basename, title_room, measure) };
@@ -335,12 +356,14 @@ pub fn pane_header(light: bool, identity: Identity, tools: Vec<PaneTool<ToolActi
             } else { row = row.opacity(0.6); }
             rows.push(row);
         }
+        let mut title = div().relative().flex_1().min_w_0().flex().child(title);
         if folded {
             let toggle = state.clone();
             let keys = state.clone();
             let rect = trigger_rect.clone();
             let button = with_rect(div().id("pane-more"), || format!("pane-more:{page}"))
-                .track_focus(&focus).tab_stop(true).focus(|s| s.border_1().border_color(c("accent")))
+                .when(hover_more && selected.is_none(), |d| d.opacity(0.).group_hover("shared-pane-header", |s| s.opacity(1.)))
+                .track_focus(&focus).tab_stop(true).focus(|s| s.opacity(1.).border_1().border_color(c("accent")))
                 .size(px(more)).flex().justify_center().items_center().cursor_pointer().child("⋯")
                 .child(canvas(move |b, _, _| rect.set(b), |_, _, _, _| {}).absolute().inset_0())
                 .on_click(move |_, w, cx| toggle.update(cx, |s, cx| {
@@ -373,10 +396,12 @@ pub fn pane_header(light: bool, identity: Identity, tools: Vec<PaneTool<ToolActi
                     } });
                 anchor = anchor.child(div().absolute().top(px(more)).right_0().child(deferred(anchored().anchor(Corner::TopRight).snap_to_window_with_margin(px(4.)).child(menu)).with_priority(2)));
             }
-            strip = strip.child(anchor);
+            if hover_more {
+                title = title.child(div().absolute().right_0().top_0().bottom_0().flex().items_center().child(anchor));
+            } else { strip = strip.child(anchor); }
         } else if selected.is_some() { state.update(cx, |s, cx| { s.0 = None; cx.notify(); }); }
-        let mut row = div().size_full().flex().items_center().gap(px(gap)).whitespace_nowrap()
-            .child(title).when(!widths.is_empty(), |r| r.child(strip)).child(close).into_any_element();
+        let mut row = div().group("shared-pane-header").size_full().flex().items_center().gap(px(gap)).whitespace_nowrap()
+            .children(grip.map(|(_, el)| el)).child(title).when(legacy > 0 || (folded && !hover_more), |r| r.child(strip)).child(close).into_any_element();
         row.prepaint_as_root(bounds.origin, size(bounds.size.width.into(), bounds.size.height.into()), w, cx);
         row
     }, |_, mut row, w, cx| row.paint(w, cx)).size_full();

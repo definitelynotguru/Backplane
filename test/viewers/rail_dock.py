@@ -27,9 +27,9 @@ Every assertion in Task 4 and Rule B7 reads ONLY from the metrics below and clea
 | `GPUI_METRIC {"event":"drag", ...}` | `from`, `to` | `[float, float]` | Start and end pointer coordinates in window pixels (must move along splitter axis). |
 | `GPUI_METRIC {"event":"refusal", ...}` | `code`, `text` | `str`, `str` | Catalog refusal code (e.g. `incompatibleOverlay` / `viewer.layout.refusal.incompatibleOverlay`) and localized human words (no raw internal codes). |
 | `viewer.layout` (hub picture, in the `viewer` block of settled/shot metrics) | `root` | `dict` | Hub `Layout` (`native/host/src/present/layout.rs`): `{"type":"tile","id","kind","source","overlay"}` leaves and `{"type":"split","id","axis":"row"\|"col","ratio","a","b"}`. No other shape is read (no `tiles` list, no `leaf`/`tile` wrappers). |
-| `crate::script::tiles_metric(started, tiles, splitters)` | call | fn | The renderer calls this on every tile/layout/frame change: it emits the `tiles` event AND stores the inventory that script selectors resolve against. |
-| `crate::script::set_splitter_drag(f)` | call | `Fn(&str id, [f32;2] from, [f32;2] to, u32 moves) -> bool` | The renderer registers how a scripted drag is delivered as a real pointer drag on splitter `id`; returns whether it was dispatched. Without it the `drag` step reports `ok:false, error:"no_drag_handler"`. |
-| script step `press` with a selector | `@tile[kind=K,source=S,focused\|unfocused].VERB` | str | Resolved by the client from the drawn inventory (exactly one match, else `found:false`) to control id `tile:<tile id>:VERB`. The renderer registers these controls (`Ctl` entries): `add-beside`, `close`, `swap` (with the other tile), `maximize`, `restore`, `overlay-gerbers` (toggle). The `press` metric carries the resolved `id` and the `selector`. |
+| `crate::script::tiles_metric(started, tiles, splitters)` | call | fn | After paint, the script joins hub leaves to measured `tile:<id>`, `tile-body:<id>`, and `splitter:<id>` rectangles. This function emits the `tiles` event AND stores the inventory that script selectors resolve against. |
+| `crate::script::set_splitter_drag(f)` | call | `Fn(&str id, [f32;2] from, [f32;2] to, u32 moves, &mut App) -> bool` | The script registers the window dispatch hook on its first frame. A scripted drag is delivered as a real pointer drag on splitter `id`; returns whether it was dispatched. Without it the `drag` step reports `ok:false, error:"no_drag_handler"`. |
+| script step `press` with a selector | `@tile[kind=K,source=S,focused\|unfocused].VERB` | str | Resolved by the client from the drawn inventory (exactly one match, else `found:false`) to control id `tile:<tile id>:VERB`. The tile header registers its drawn actions with the script registry: `add-beside`, `close`, `swap` (with the other tile), `maximize`, `restore`, `overlay-gerbers` (toggle). The `press` metric carries the resolved `id` and the `selector`. |
 | script step `drag` | `{"drag":{"splitter":"@splitter[axis=x]"\|"<id>","dx":N,"dy":N,"moves":N}}` | obj | Drags the drawn splitter along its axis (`dx` for `x`, `dy` for `y`); emits `drag` with `ok`, `splitter`, `axis`, `from`, `to`, `moves`. |
 | menu entries after `add-beside` | `add-beside:<kind>` / `add-beside:<kind>:<right\|left\|bottom\|top>` | control ids | Page and side entries (kind and side are fixed words, not tile ids). `add-beside:<kind>` means right. |
 | `GPUI_METRIC {"event":"refusal"}` | emitted when the hub refuses a layout change | event | After `overlay-gerbers` on the Files tile: `code` is `incompatibleOverlay`, `text` human words. The refusal must leave `viewer.layout` unchanged. |
@@ -325,6 +325,7 @@ def _chain(presses: dict[str, list[dict]], mark: str) -> list[dict]:
 def _reset_idle(tag: str, tmo: int) -> list[dict]:
     """Back to no open page, so a following `rail:Board` opens Board (pressed on a focused Board it would close it)."""
     return [
+        {"mark": f"reset:{tag}"},
         {"keys": "ctrl-l"},
         {"wait": 60},
         {"keys": "escape"},
