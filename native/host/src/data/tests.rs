@@ -1264,8 +1264,10 @@ async fn viewer_layout_over_a_socket_is_per_device_pushed_and_refuses_in_code_ke
     let tiles = r["result"]["tiles"].as_array().unwrap().clone();
     let files = tiles.iter().find(|t| t["kind"] == "files").unwrap()["id"].as_str().unwrap().to_string();
     let board = tiles.iter().find(|t| t["kind"] == "board").unwrap()["id"].as_str().unwrap().to_string();
+    // the new tile (Files) is the focused one: the phone stack's visible set is empty already
     let w = ask(&mut a, 21, "viewer.watch", json!({"thread":"tl","kind":"layout","bounds":[390,844]})).await;
-    assert_eq!(w["result"]["tiles"].as_object().unwrap().len(), 1, "{w}");
+    assert_eq!((w["result"]["tiles"].clone(), w["result"]["keys"].clone()), (json!({}), json!([])), "{w}");
+    assert_eq!(ask(&mut a, 31, "viewer.layout.act", json!({"thread":"tl","op":"focus","tile":board,"bounds":[390,844]})).await["result"]["watch"]["tiles"].as_object().unwrap().len(), 1);
     let ca = *held(&plots).keys().find(|c| **c != cb).expect("a's own set");
     let r = ask(&mut a, 22, "viewer.layout.act", json!({"thread":"tl","op":"focus","tile":files,"bounds":[390,844]})).await;
     assert_eq!(r["result"]["watch"]["tiles"], json!({}), "{r}");
