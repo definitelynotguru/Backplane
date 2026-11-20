@@ -41,7 +41,7 @@ pub(super) fn focused_files(thread: &Value) -> &Value {
     let viewer = &thread["viewer"];
     if let Some(id) = viewer["layout"]["focus"].as_str() {
         let row = &viewer["tiles"][id];
-        if viewer["splitLimits"].is_object() && row["kind"] == "files" {
+        if crate::screens::viewer::is_tiled(viewer) && row["kind"] == "files" {
             return picture(thread, row, "files");
         }
     }

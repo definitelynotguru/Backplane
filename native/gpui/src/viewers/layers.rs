@@ -65,7 +65,7 @@ pub fn toggle(this: &mut Backplane, cx: &mut Context<Backplane>) {
 /// Escape while the Layers panel is open shuts it (main.rs's ClosePopup). True when it took the key.
 pub fn escape(this: &mut Backplane, cx: &mut Context<Backplane>) -> bool {
     let layout = &this.data["thread"]["viewer"]["layout"];
-    let slot = layout["focus"].as_str().and_then(|id| this.screens.plots.tile_slot(id)).filter(|_| layout["root"]["type"] == "split").unwrap_or(0);
+    let slot = layout["focus"].as_str().and_then(|id| this.screens.plots.tile_slot(id)).filter(|_| crate::screens::viewer::is_tiled(&this.data["thread"]["viewer"])).unwrap_or(0);
     if !this.screens.plots[slot].layers_open { return false }
     this.screens.plots[slot].layers_open = false; cx.notify(); true
 }

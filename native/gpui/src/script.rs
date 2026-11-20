@@ -329,8 +329,7 @@ impl Backplane {
             // G4: the controls on screen, on change
             let rects = crate::art::ctl_rects();
             let layout = &self.data["thread"]["viewer"]["layout"];
-            let (tiles, splitters) = if layout["root"]["type"] == "split"
-                && !rects.contains_key("tile-page:split") {
+            let (tiles, splitters) = if crate::screens::viewer::is_tiled(&self.data["thread"]["viewer"]) {
                 let picture = &self.data["thread"]["viewer"]["tiles"];
                 TILE_PAINTS.with_borrow_mut(|(owner, counts)| {
                     if owner != &self.selected {
@@ -1141,7 +1140,7 @@ impl Backplane {
         let th = &self.data["thread"];
         let v = &th["viewer"];
         if let Some(st) = rail_row_state(v, want) { return Some(st); }
-        if v["splitLimits"].is_object() && matches!(want, "files" | "review" | "diff" | "browser") {
+        if crate::screens::viewer::is_tiled(v) && matches!(want, "files" | "review" | "diff" | "browser") {
             let id = v["layout"]["focus"].as_str()?;
             let row = &v["tiles"][id];
             if row["kind"] != want || !crate::art::ctl_rects().contains_key(&format!("tile-body:{id}")) { return None; }

@@ -1137,6 +1137,7 @@ pub fn viewer_json(st: &State, template: &Value, session: &Value) -> Option<Valu
     // filesystem discovery; linked-machine threads use mirrored values only.
     let mut active_layout = super::layout::Layout::empty();
     let mut had_stored_layout = false;
+    v["tiled"] = json!(false);
     if !sel.is_empty() {
         let linked = sel.contains('~');
         let (eff_root_local, default_pcb, default_sch, default_gerber_set) = if local {
@@ -1202,6 +1203,7 @@ pub fn viewer_json(st: &State, template: &Value, session: &Value) -> Option<Valu
         v["showToken"] = json!(true); // this hub answers an agent show's token (`view-show`): a desktop without it sends plain `view`
         v["layout"] = serde_json::to_value(&active_layout).unwrap_or(Value::Null);
         if let Some(root @ super::layout::Node::Split { .. }) = active_layout.root.as_ref().filter(|_| had_stored_layout) {
+            v["tiled"] = json!(true);
             // Supply the same child minima used by layout-resize for a local pointer preview.
             let mut limits = serde_json::Map::new();
             split_limits(root, &mut limits);

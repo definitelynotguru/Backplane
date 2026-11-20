@@ -731,7 +731,7 @@ impl Backplane {
         let update = if self.screens.kicad.is_some() { crate::screens::kicad_update::view(self, cx) } else { None };
         self.screens.plots[0].loading.begin_frame(self.data["thread"]["id"].as_str().unwrap_or(""));
         let review_panel = crate::screens::mgmt::review_panel(self, cx);
-        let docked = self.data["thread"]["viewer"]["splitLimits"].is_object();
+        let docked = crate::screens::viewer::is_tiled(&self.data["thread"]["viewer"]);
         let el = if docked {
             crate::screens::tiles::page(self, cx, light, review_panel)
         } else {
@@ -800,7 +800,7 @@ impl Render for Backplane {
         for page in self.screens.retired_solids.drain(..) { page.update(cx, |p, _| p.release(window)); }
         let back = self.local.viewer_backdrop(self.light()); back.make_current();
         if let Some(s) = self.screens.active_solid().cloned() { let (part, split) = (crate::screens::plotview::probed_part(self), self.data["thread"]["viewer"]["open"] == "split"); s.update(cx, |p, _| { p.set_backdrop(back); p.set_probe(&part); p.names_probe = !split; }); }
-        if self.data["thread"]["viewer"]["splitLimits"].is_object() {
+        if crate::screens::viewer::is_tiled(&self.data["thread"]["viewer"]) {
             let part = crate::screens::plotview::probed_part(self);
             for page in self.screens.tile_solids() {
                 page.update(cx, |p, _| { p.set_backdrop(back); p.set_probe(&part); p.collect(window); });
@@ -845,7 +845,7 @@ impl Render for Backplane {
         if crate::screens::viewer::fit(win_w, self.local.sidebar_px as f32, self.sidebar_open, false, viewer_open).0 { self.screens.side_force = false; } // room again: "anyway" is over
         let (side_shown, thread_least, pane_least, share) = crate::screens::viewer::fit(win_w, self.local.sidebar_px as f32, self.sidebar_open, self.screens.side_force, viewer_open);
         // the embedded editor at full size: the sidebar folds and the thread gives all its room (screens/viewer.rs pane)
-        let docked = thread["viewer"]["splitLimits"].is_object();
+        let docked = crate::screens::viewer::is_tiled(&thread["viewer"]);
         let kedit = !docked && viewer_open && self.screens.kicad.is_some() && self.screens.kicad_window.is_none() && matches!(thread["viewer"]["open"].as_str(), Some("board" | "schematic" | "3d"));
         // full screen: the editor and its strip are the whole window (no top bar, sidebar, thread, rail or pane bar)
         if !kedit { self.screens.kicad_screen = false; } // the editor left the pane: the next Edit starts in the pane, not over the window
@@ -1040,7 +1040,7 @@ impl Render for Backplane {
                 }
                 let layout = &thread["viewer"]["layout"];
                 let add_beside = !is_tool && id != "split" && layout["focus"].is_string()
-                    && !(can_embed && crate::screens::viewer::holds_editor(thread) && layout["root"]["type"] != "split" && self.kicad_for(thread,cx).is_some());
+                    && !(can_embed && crate::screens::viewer::holds_editor(thread) && !crate::screens::viewer::is_tiled(&thread["viewer"]) && self.kicad_for(thread,cx).is_some());
                 let mut tooltip = crate::keys::tip_text(&trs(row.label), &hint);
                 if add_beside {
                     tooltip.push('\n');

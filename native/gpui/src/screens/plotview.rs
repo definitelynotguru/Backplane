@@ -752,9 +752,9 @@ pub fn state_json(v: &serde_json::Value, card: Option<&super::plot::Card>, lit: 
     state["report"] = serde_json::json!(2);
     // a stored layout of several tiles: what it holds ("kind\tsource"), since the page is only the focused tile's
     // (only the tiles on screen: a maximized tile hides the rest)
-    if open != "split" {
+    if super::viewer::is_tiled(v) {
         let visible = v["layout"]["maximized"].as_str().filter(|m| !m.is_empty());
-        if let Some(ts) = v["tiles"].as_object().filter(|t| t.len() >= 2) {
+        if let Some(ts) = v["tiles"].as_object() {
             state["tiles"] = serde_json::json!(ts.iter().filter(|(id, _)| visible.map_or(true, |m| m == id.as_str())).map(|(_, t)| format!("{}\t{}", t["kind"].as_str().unwrap_or(""), t["source"].as_str().unwrap_or(""))).collect::<Vec<_>>());
         }
     }
@@ -921,10 +921,10 @@ mod tests {
         let plain = state_json(&json!({"open": "board", "key": "0|/p|"}), None, 0);
         assert!(plain.get("panes").is_none() && plain.get("dir").is_none() && plain.get("file").is_none() && plain.get("tiles").is_none());
         assert_eq!(plain["report"], 2, "this client says it reports the fields a show is read back from");
-        let stored = state_json(&json!({"open": "board", "key": "0|/p|", "tiles": {"t1": {"kind": "board", "source": "a.kicad_pcb"}, "t2": {"kind": "schematic", "source": "a.kicad_sch"}}}), None, 0);
+        let stored = state_json(&json!({"open":"board","tiled":true, "key": "0|/p|", "tiles": {"t1": {"kind": "board", "source": "a.kicad_pcb"}, "t2": {"kind": "schematic", "source": "a.kicad_sch"}}}), None, 0);
         let mut ts: Vec<String> = stored["tiles"].as_array().unwrap().iter().map(|v| v.as_str().unwrap().to_string()).collect(); ts.sort();
         assert_eq!(ts, ["board\ta.kicad_pcb", "schematic\ta.kicad_sch"]);
-        let hidden = state_json(&json!({"open": "board", "key": "0|/p|", "layout": {"maximized": "t1"}, "tiles": {"t1": {"kind": "board", "source": "a.kicad_pcb"}, "t2": {"kind": "schematic", "source": "a.kicad_sch"}}}), None, 0);
+        let hidden = state_json(&json!({"open":"board","tiled":true, "key": "0|/p|", "layout": {"maximized": "t1"}, "tiles": {"t1": {"kind": "board", "source": "a.kicad_pcb"}, "t2": {"kind": "schematic", "source": "a.kicad_sch"}}}), None, 0);
         assert_eq!(hidden["tiles"], json!(["board\ta.kicad_pcb"]), "a maximized tile hides the other from the report");
     }
     #[test] fn state_json_reports_gerbers_flag_and_empty_reason() {

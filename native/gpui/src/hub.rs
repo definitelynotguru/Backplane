@@ -215,18 +215,6 @@ async fn failover(config:&Config,cfg:&Config,on_home:Option<&str>,down:Duration,
     let o=crate::pairing::http_of(&ws);let up=tokio::task::spawn_blocking(move||crate::pairing::answers(&o)).await.unwrap_or(false);
     crate::hubs::on_home(&main,&key,false,down,up,false).then(||Some((key,ws,cred)))
 }
-/// Older saved Split sessions watch three named panes through the legacy path.
-fn legacy_split_watch(picture: &Value) -> Option<Value> {
-    let thread = &picture["shown"]["thread"];
-    let viewer = &thread["viewer"];
-    let id = thread["id"].as_str()?;
-    if viewer["open"] != "split" || !viewer["panes"].is_array()
-        || picture["session"]["drafts"][format!("@view.layout:{id}")].as_str().is_some_and(|l| !l.is_empty()) { return None; }
-    let panes = &viewer["panes"];
-    Some(json!({"thread":id, "picture":viewer["tiles"], "tiles":{
-        "sch":[panes[0]["key"]], "pcb":[panes[1]["key"]], "3d":[panes[2]["key"], panes[1]["key"]]
-    }}))
-}
 /// A watch set can stream its initial frames before its RPC reply. Announce the
 /// requested source keys after the picture and replace them with the hub's table
 /// on acknowledgment. Only the latest watch on this connection owns that reply.
@@ -415,9 +403,8 @@ async fn session(config:&Config,commands:&mut mpsc::Receiver<Command>,events:&as
                         let request=v.page("");sink.send(Message::Binary(wire::encode(&request).into())).await?;
                     }
                     else if on_older {v.dirty=true;}
-                    else if r["shown"].is_object(){let legacy = legacy_split_watch(r);
+                    else if r["shown"].is_object(){
                         let _=events.send(Event::Picture(rv,timing)).await;
-                        if let Some(watch) = legacy { let _ = events.send(Event::Data("dock-watch", watch)).await; }
                         let _ = events.send(Event::Status("Connected".into())).await; // i18n-ok: protocol status translated by trs when drawn
                     }
                 },

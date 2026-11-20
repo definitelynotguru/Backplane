@@ -309,8 +309,8 @@ impl PlotSlots {
         }
     }
 
-    pub fn sync_tiles(&mut self, picture: &serde_json::Value) {
-        let tiles = picture.as_object().filter(|tiles| tiles.len() > 1);
+    pub fn sync_tiles(&mut self, viewer: &serde_json::Value) {
+        let tiles = viewer["tiles"].as_object().filter(|_| viewer::is_tiled(viewer));
         self.tiles.retain(|id, tile| {
             let keep = tiles.and_then(|t| t.get(id)).is_some_and(|t| tile_source(t) == tile.source);
             if !keep { self.slots.remove(&tile.slot); }
@@ -393,7 +393,7 @@ mod slot_tests {
         let mut picture = json!({"left":{"kind":"board","source":"a"},
             "right":{"kind":"3d","source":"a"}});
         slots.sync("thread", true, false);
-        slots.sync_tiles(&picture);
+        slots.sync_tiles(&json!({"tiled":true,"tiles":picture}));
         let slot = slots.tile_slot("right").unwrap();
         assert_ne!(slots.tile_slot("left"), Some(slot));
         slots[slot].hands = 2;
@@ -406,20 +406,20 @@ mod slot_tests {
         slots.bind_watch(&watch);
         assert_eq!(slots.tile_keys("right"), ["model", "plot"]);
         picture["right"]["key"] = json!("focused-key");
-        slots.sync_tiles(&picture);
+        slots.sync_tiles(&json!({"tiled":true,"tiles":picture}));
         assert_eq!(slots[slot].hands, 2);
         picture["right"]["source"] = json!("b");
-        slots.sync_tiles(&picture);
+        slots.sync_tiles(&json!({"tiled":true,"tiles":picture}));
         slots.bind_watch(&watch);
         assert_ne!(slots.tile_slot("right"), Some(slot));
         assert!(slots.tile_keys("right").is_empty());
         assert!(!slots.watches("model"));
         assert!(slots.watches("plot"));
         slots.sync("other", true, false);
-        slots.sync_tiles(&picture);
+        slots.sync_tiles(&json!({"tiled":true,"tiles":picture}));
         assert!(!slots.bind_watch(&watch));
         assert!(slots.tile_keys("left").is_empty());
-        slots.sync_tiles(&json!({"left":picture["left"]}));
+        slots.sync_tiles(&json!({"tiled":false,"tiles":picture}));
         assert!(slots.tile_slot("left").is_none());
     }
 

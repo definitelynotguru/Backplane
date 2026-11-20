@@ -261,7 +261,7 @@ impl Backplane {
         let owner = thread["id"].as_str().unwrap_or("");
         let open = super::viewer::is_open(thread);
         self.screens.plots.sync(owner, open, thread["viewer"]["open"] == "split");
-        self.screens.plots.sync_tiles(&thread["viewer"]["tiles"]);
+        self.screens.plots.sync_tiles(&thread["viewer"]);
         self.sync_solid_slot();
         self.sync_tile_solids(cx);
         self.draft_from_hub(cx);
@@ -391,7 +391,7 @@ impl Backplane {
     /// The Browser page exists while the Browser kind is open (one per thread, polling only while shown); the owner is `browser_owner` (the bot's id on a bot's screen, else the thread).
     pub(crate) fn browser_page(&mut self, cx: &mut Context<Self>) {
         let viewer = &self.data["thread"]["viewer"];
-        let docked_browser = viewer["splitLimits"].is_object() && viewer["tiles"].as_object().is_some_and(|tiles|
+        let docked_browser = crate::screens::viewer::is_tiled(viewer) && viewer["tiles"].as_object().is_some_and(|tiles|
             tiles.iter().any(|(id, tile)| tile["kind"] == "browser"
                 && viewer["layout"]["maximized"].as_str().is_none_or(|max| max == id)));
         let open = docked_browser || viewer["open"].as_str() == Some("browser") || (self.data["bot"]["kind"] == "bot" && self.data["bot"]["tab"] == "browser");

@@ -131,7 +131,7 @@ pub fn zoom_pending(app: &mut Backplane) {
     let v = app.data["thread"]["viewer"].clone();
     if want.is_empty() || v["probe"].as_str() != Some(want.as_str()) { return }
     let panes = v["panes"].as_array().cloned().unwrap_or_default();
-    let slots: Vec<(usize, String)> = if v["splitLimits"].is_object() {
+    let slots: Vec<(usize, String)> = if crate::screens::viewer::is_tiled(&v) {
         super::plotview::dock_plot_targets(app)
     } else if panes.len() >= 3 { vec![(1, crate::string(&panes[0], "key")), (2, crate::string(&panes[1], "key"))] }
         else { vec![(0, app.screens.plot.frame.as_ref().map(|f| f.key.clone()).unwrap_or_default())] };

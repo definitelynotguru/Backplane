@@ -62,7 +62,7 @@ pub fn shows(open: &str) -> bool { matches!(open, "board" | "schematic" | "3d" |
 /// The project file the panels are for: the design the viewer shows, None while the pane shows something else (or a diff is over it).
 pub fn project_for(thread: &Value) -> Option<String> {
     let v = &thread["viewer"];
-    if v["layout"]["root"]["type"] == "split" {
+    if crate::screens::viewer::is_tiled(v) {
         let tiles = v["tiles"].as_object()?;
         let leaf = tiles.values().find(|row| matches!(row["kind"].as_str(), Some("board" | "schematic" | "3d" | "gerbers")))?;
         return v["designPanels"]["bom"]["project"].as_str().map(str::to_owned)
@@ -293,7 +293,7 @@ pub fn host(app: &mut Backplane, page: AnyElement, window: &mut Window, cx: &mut
     let bottom = st["side"] == "bottom";
     // tabs: the panel's name and its badge (the hub's count of what needs doing); the open one underlined
     let mut strip = div().id("mgmt-strip").flex_shrink_0().h(crate::scale::tpx(STRIP_H)).flex().items_center().gap(px(2.)).px_2().bg(c("panel")).border_t_1().border_color(c("rule")).text_size(crate::scale::tpx(11.));
-    let tiled = app.data["thread"]["viewer"]["layout"]["root"]["type"] == "split";
+    let tiled = crate::screens::viewer::is_tiled(&app.data["thread"]["viewer"]);
     if tiled {
         strip = crate::ui::with_rect(strip.w_full().min_w_0().overflow_hidden().mt(px(3.)), || "design-strip".into());
     }

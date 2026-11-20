@@ -154,6 +154,22 @@ pub fn shown(kind: &str, path: &str) -> Option<(String, Option<String>)> {
     Some((k.to_string(), (k == "mech" && model).then(|| path.to_string())))
 }
 
+/// Whether this picture uses the stored multi-tile renderer. Main's Split page has its own renderer.
+pub fn is_tiled(viewer: &Value) -> bool {
+    // Older hubs emitted split limits only for a stored multi-tile layout.
+    viewer["tiled"].as_bool().unwrap_or_else(|| viewer["splitLimits"].is_object())
+}
+
+#[cfg(test)]
+#[test]
+fn hub_distinguishes_a_dock_from_legacy_split() {
+    use serde_json::json;
+    assert!(is_tiled(&json!({"tiled":true})));
+    assert!(!is_tiled(&json!({"tiled":false,"splitLimits":{}})));
+    assert!(is_tiled(&json!({"splitLimits":{}})));
+    assert!(!is_tiled(&json!({"open":"split","layout":{"root":{"type":"split"}}})));
+}
+
 /// Whether the panel is open: a viewer page is on, or the thread has a diff.
 /// Whether the pane is up: a page the hub has open, or a rail press it has not answered yet (`pane_page`): the pane opens and shuts at the press.
 pub fn is_open(thread: &Value) -> bool { pane_page(thread, false).is_some() }
