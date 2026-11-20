@@ -1297,4 +1297,5 @@ async fn viewer_layout_over_a_socket_is_per_device_pushed_and_refuses_in_code_ke
     assert_eq!((e["error"]["code"].as_str(), e["error"]["key"].as_str()), (Some("invalidInput"), Some("viewer.layout.refusal.invalidinput")));
     // zero bounds are clamped (to 100), not refused
     assert_eq!(ask(&mut a, 30, "viewer.layout", json!({"thread":"tl","bounds":[0,0]})).await["result"]["bounds"], json!([100.0, 100.0]));
+    crate::files::watch_dir::forget_root(&root); // a Files tile drew the folder: leave nothing registered for another test's poll
 }

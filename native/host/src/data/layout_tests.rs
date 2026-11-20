@@ -3,6 +3,8 @@ use super::*;
 use crate::present::layout::Refusal;
 
 struct Fx { dir: crate::plat::tmp::TempDir, root: String, st: crate::state::State }
+// a Files tile draws its folder, which a Files page registers for the hub's disk watch: leave nothing behind for another test's poll
+impl Drop for Fx { fn drop(&mut self) { crate::files::watch_dir::forget_root(&self.root) } }
 
 fn fx() -> Fx {
     let d = crate::plat::tmp::dir("data-layout");
