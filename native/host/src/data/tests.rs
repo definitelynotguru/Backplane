@@ -1257,7 +1257,8 @@ async fn viewer_layout_over_a_socket_is_per_device_pushed_and_refuses_in_code_ke
     // a watch-only caller is told of the layout's changes too, and so is the sender
     let r = ask(&mut a, 20, "viewer.layout.act", json!({"thread":"tl","op":"add","kind":"files","page":"board","bounds":[390,844]})).await;
     assert_eq!(r["ok"], true, "{r}");
-    let push = next(&mut b).await;
+    // (the real handler streams plot frames to b meanwhile: skip them)
+    let push = loop { let f = next(&mut b).await; if f["t"] == "layout" { break f } };
     assert_eq!(push["t"], "layout", "{push}");
     // a phone stack with Files focused: the visible set is EMPTY and the hub's handler is told (it stops what it was streaming for that connection)
     let tiles = r["result"]["tiles"].as_array().unwrap().clone();
