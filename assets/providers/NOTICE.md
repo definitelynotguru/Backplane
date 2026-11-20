@@ -13,7 +13,7 @@ Checked 2026-11-18 against each upstream; where the source says "official artwor
 | antigravity.svg | Antigravity | The arch of the favicon https://antigravity.google/favicon.svg, rescaled to 24x24 with its gradient and glow dropped (one tint). Official artwork | No open licence found; Google's trademark. Shown to identify the agent |
 | omp.svg | Oh My Pi | `assets/icon.svg` of https://github.com/can1357/oh-my-pi (a pi sign with a plug), redrawn as one path in one tint: the plug is a separate block under the right leg, where the original overlaps it in another colour | MIT (the repository, Copyright Mario Zechner and Can Bölük) |
 | codex.svg | Codex | **Drawn for Backplane**: a terminal prompt (a chevron and an underscore) | Backplane's own. Not OpenAI's mark |
-| devin.svg | Devin | **Drawn for Backplane**: a bold D | Backplane's own. Not Cognition's mark |
+| devin.svg | Devin | The mark of the ACP registry's Devin entry (https://cdn.agentclientprotocol.com/registry/v1/latest/devin.svg, the `icon` of `devin` in registry.json), rescaled from its 263x300 viewBox to 24x24, centred. Official artwork | No open licence found; Cognition's trademark. Shown to identify the agent |
 
 ## What is not an official mark
 
@@ -22,5 +22,5 @@ Checked 2026-11-18 against each upstream; where the source says "official artwor
 
 ## Terms
 
-CC0 covers simple-icons' files, not the trademarks. Grok's and Antigravity's artwork has no licence the project states: it is shown only to say which agent a row is (nominative use), never as Backplane's own branding. If an owner asks, or the person decides against it, delete the file: `mark_path` and the picker fall back to the square.
+CC0 covers simple-icons' files, not the trademarks. Grok's, Antigravity's and Devin's artwork has no licence the project states: it is shown only to say which agent a row is (nominative use), never as Backplane's own branding. If an owner asks, or the person decides against it, delete the file: `mark_path` and the picker fall back to the square.
 The marks are tinted a single colour by the client, so none keeps its gradient, glow or tile.
