@@ -1622,13 +1622,19 @@ fn ring_form(words: &str, audio: &[u8], at: u64) -> Vec<u8> {
 
 // ---- bots across linked machines (bots/far.rs): two hubs, each with its Bots, wired to each other through an OwnerLink that calls the other's `far_received`
 // (the route's own gate, "only a link that is one of the owner's own", is net/rpc/tests.rs)
-struct Wire { to: std::sync::OnceLock<Arc<Bots>>, as_link: String, peer_name: String, up: std::sync::atomic::AtomicBool, seen: StdMutex<Vec<String>> }
+struct Wire { to: std::sync::OnceLock<Arc<Bots>>, as_link: String, peer_name: String, up: std::sync::atomic::AtomicBool, seen: StdMutex<Vec<String>>, hold: Hold }
+/// `bots.hello` held while `on` (a slow machine, made exact): `waiting` counts the ones that arrived
+#[derive(Default)] struct Hold { on: std::sync::atomic::AtomicBool, waiting: std::sync::atomic::AtomicUsize }
 impl mail::owner::OwnerLink for Wire {
     fn post<'a>(&'a self, link: &'a str, body: String) -> Fut<'a, Option<(u16, String)>> {
         Box::pin(async move {
             if link != "L1" || !self.up.load(std::sync::atomic::Ordering::SeqCst) { return None }
             let o: Value = serde_json::from_str(&body).unwrap(); let (m, p) = (o["m"].as_str().unwrap().to_string(), o["p"].clone());
             self.seen.lock().unwrap().push(m.clone());
+            if m == "bots.hello" && self.hold.on.load(std::sync::atomic::Ordering::SeqCst) {
+                self.hold.waiting.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                while self.hold.on.load(std::sync::atomic::Ordering::SeqCst) { tokio::time::sleep(std::time::Duration::from_millis(10)).await }
+            }
             let to = self.to.get().unwrap();
             if m == "mcp.call" { // what net/rpc.rs makes of it
                 let (c, t) = to.far_received(&self.as_link, &format!("tool.{}", p["tool"].as_str().unwrap()), &p["args"]).await;
@@ -1642,8 +1648,8 @@ impl mail::owner::OwnerLink for Wire {
 struct Two { ba: Arc<Bots>, ra: Arc<Rec>, bb: Arc<Bots>, rb: Arc<Rec>, ada: String, bob: String, wa: Arc<Wire>, ha: crate::hub::TestHub, hb: crate::hub::TestHub }
 async fn two(tag: &str) -> Two {
     let (ha, ba, ra) = start(&format!("far{tag}A"), "").await; let (hb, bb, rb) = start(&format!("far{tag}B"), "").await;
-    let wa = Arc::new(Wire { to: Default::default(), as_link: "L1".into(), peer_name: "deskB".into(), up: true.into(), seen: Default::default() });
-    let wb = Arc::new(Wire { to: Default::default(), as_link: "L1".into(), peer_name: "deskA".into(), up: true.into(), seen: Default::default() });
+    let wa = Arc::new(Wire { to: Default::default(), as_link: "L1".into(), peer_name: "deskB".into(), up: true.into(), seen: Default::default(), hold: Default::default() });
+    let wb = Arc::new(Wire { to: Default::default(), as_link: "L1".into(), peer_name: "deskA".into(), up: true.into(), seen: Default::default(), hold: Default::default() });
     wa.to.set(bb.clone()).ok(); wb.to.set(ba.clone()).ok();
     ba.set_owner_link(wa.clone()); bb.set_owner_link(wb); ba.far_start(); bb.far_start();
     let (ada, bob) = (bot(&ha, "ada").await, bot(&hb, "bob").await);
@@ -1675,6 +1681,26 @@ fn room_members(hub: &Arc<Hub>, room: &str) -> Option<String> { log(hub).iter().
     assert_eq!((posts(&t.ha, &rid).len(), posts(&t.hb, &rid).len()), (2, 2), "each post once on each machine, none sent back: {:?} {:?}", posts(&t.ha, &rid), posts(&t.hb, &rid));
     assert_eq!(log(&t.ha).iter().filter(|e| e["$"] == "RoomSet" && e["id"] == rid.as_str()).count(), 1, "the room change was not sent back and forth");
     assert_eq!(log(&t.hb).iter().filter(|e| e["$"] == "RoomSet" && e["id"] == rid.as_str()).count(), 1);
+}
+/// Two changes from one machine, the second applied before the first one's forward has run: neither goes back. The forward of the first knows it
+/// came from there by its own state, not by the last change applied (which once made it send the older state back as a change: the other machine
+/// stored it and its newer members were gone, and a post of the member it lost was refused there).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)] async fn two_changes_from_one_machine_in_a_row_are_not_sent_back() {
+    let t = two("echo").await;
+    let rid = "r1795000000-77";
+    let sync = |members: Value| json!({"room":rid,"name":"lab","members":members,"deleted":false,"ephemeral":false,"closed":false});
+    // A's forward of the first change asks B who it is (a machine id it has not learned yet) and is held there
+    t.wa.hold.on.store(true, std::sync::atomic::Ordering::SeqCst);
+    assert_eq!(t.ba.far_received("L1", "bots.room_sync", &sync(json!(["ada", "bob@L1"]))).await.0, 200);
+    for _ in 0..200 { if t.wa.hold.waiting.load(std::sync::atomic::Ordering::SeqCst) > 0 { break } tokio::time::sleep(std::time::Duration::from_millis(25)).await }
+    assert!(t.wa.hold.waiting.load(std::sync::atomic::Ordering::SeqCst) > 0, "the first forward reached B");
+    // meanwhile B's next change: cy joined
+    assert_eq!(t.ba.far_received("L1", "bots.room_sync", &sync(json!(["ada", "bob@L1", "cy@L1"]))).await.0, 200);
+    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    t.wa.hold.on.store(false, std::sync::atomic::Ordering::SeqCst);
+    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+    assert!(room_members(&t.ha, rid).unwrap().contains("cy@L1"));
+    assert!(!t.wa.seen.lock().unwrap().iter().any(|m| m == "bots.room_sync"), "A sent B's change back to B: {:?}; B stored {:?}", t.wa.seen.lock().unwrap(), room_members(&t.hb, rid));
 }
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)] async fn leaving_and_joining_a_shared_room_reaches_the_other_machine() {
     let t = two("member").await;
