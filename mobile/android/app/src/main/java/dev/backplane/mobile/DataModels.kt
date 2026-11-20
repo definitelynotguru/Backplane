@@ -26,6 +26,7 @@ data class DEntry(
     val voice: DVoiceMark? = null, // spoken (data/1 `voice`): the mic on the bubble, the engine and its confidence
     val copy: List<CopyPiece>? = null, // what of a reply or a notice is to copy (feature `copy`, data/1 `copy`); null: the hub said nothing
     val restore: DRestore? = null, // the person's message: the snapshot before the turn it started (data/1 `restore`): Restore to before this
+    val replyParam: Map<String, String>? = null, // phone-only: the `replyTo {id, text}` a message this phone is sending carries (feature `reply`), for Retry
 )
 /** Restore to before this (data/1 `restore`): the turn (0: a snapshot from before it was named), its short commit, the short info its confirm shows. */
 data class DRestore(val turn: Long, val commit: String, val info: String)
