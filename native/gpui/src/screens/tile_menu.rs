@@ -143,7 +143,6 @@ impl Action {
             Self::Send(action, payload) => {
                 this.screens.tile_menu.open = None;
                 this.screens.tile_menu.nav = None;
-                this.screens.tile_menu.refusal = None;
                 let _ = this
                     .tx
                     .try_send(Command::Action((*action).into(), payload.to_string()));
@@ -190,24 +189,37 @@ pub(crate) fn refused(this: &mut Backplane, reply: &Value, cx: &mut Context<Back
     }
     this.m("refusal", json!({"code":reply["code"], "text":text}));
     if let (Some(thread), Some(tile)) = (reply["thread"].as_str(), reply["tile"].as_str()) {
-        let state = &mut this.screens.tile_menu;
-        state.refusal = Some((thread.into(), tile.into(), text));
-        state.refusal_generation += 1;
-        let generation = state.refusal_generation;
-        cx.spawn(async move |this, cx| {
-            Timer::after(std::time::Duration::from_secs(5)).await;
-            let _ = this.update(cx, |app, cx| {
-                let state = &mut app.screens.tile_menu;
-                if state.refusal_generation == generation && state.refusal.take().is_some() {
-                    app.ui_epoch += 1;
-                    cx.notify();
-                }
-            });
-        })
-        .detach();
+        show_refusal(this, thread, tile, text, cx);
+        return;
     } else {
         this.note = text;
     }
+    this.ui_epoch += 1;
+    cx.notify();
+}
+
+pub(super) fn show_refusal(
+    this: &mut Backplane,
+    thread: &str,
+    tile: &str,
+    text: String,
+    cx: &mut Context<Backplane>,
+) {
+    let state = &mut this.screens.tile_menu;
+    state.refusal = Some((thread.to_owned(), tile.to_owned(), text));
+    state.refusal_generation += 1;
+    let generation = state.refusal_generation;
+    cx.spawn(async move |this, cx| {
+        Timer::after(std::time::Duration::from_secs(5)).await;
+        let _ = this.update(cx, |app, cx| {
+            let state = &mut app.screens.tile_menu;
+            if state.refusal_generation == generation && state.refusal.take().is_some() {
+                app.ui_epoch += 1;
+                cx.notify();
+            }
+        });
+    })
+    .detach();
     this.ui_epoch += 1;
     cx.notify();
 }
@@ -225,10 +237,6 @@ fn entry(
     label: String,
     press: Press,
 ) -> Stateful<Div> {
-    let paint_id = id.clone();
-    let drawn = label;
-    let page = page.to_owned();
-    let registered = press.clone();
     let entity = cx.entity().downgrade();
     with_rect(
         with_rect(div().id(SharedString::from(id.clone())), || id.clone()),
@@ -239,16 +247,20 @@ fn entry(
     .px_1()
     .py_1()
     .hover(|s| s.bg(theme::color(light, "raise")))
-    .child(
-        canvas(
-            move |_, _, _| {
-                crate::script::header_action(&page, &paint_id, &drawn, false, Some(registered));
-            },
-            |_, _, _, _| {},
+    .when(crate::script::header_tracking(), |d| {
+        let page = page.to_owned();
+        let registered = press.clone();
+        d.child(
+            canvas(
+                move |_, _, _| {
+                    crate::script::header_action(&page, &id, &label, false, Some(registered));
+                },
+                |_, _, _, _| {},
+            )
+            .absolute()
+            .inset_0(),
         )
-        .absolute()
-        .inset_0(),
-    )
+    })
     .on_click(move |_, w, cx| {
         cx.stop_propagation();
         let _ = entity.update(cx, |this, cx| press.run(this, w, cx));
@@ -529,8 +541,12 @@ pub fn decorate(
         return h;
     }
     let open = state.open.as_ref() == Some(&owner);
-    let add_id = format!("tile:{id}:add-beside");
-    let tiled = viewer["layout"]["root"]["type"] == "split";
+    let tiled = super::viewer::is_tiled(viewer);
+    let add_id = if tiled {
+        format!("tile:{id}:add-beside")
+    } else {
+        format!("tile:{id}:more:add-beside")
+    };
     let mut menu = state
         .nav
         .as_ref()
@@ -661,7 +677,7 @@ pub(super) fn corner(
 
 #[cfg(test)]
 mod tests {
-    use super::{State, SIDES};
+    use super::{SIDES, State};
     use serde_json::json;
 
     #[test]

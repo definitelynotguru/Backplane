@@ -6,7 +6,13 @@ use std::{cell::Cell, collections::HashMap, rc::Rc};
 
 #[derive(Default)]
 pub struct Dock {
-    drag: Option<Resize>,
+    drag: Rc<std::cell::RefCell<Option<Resize>>>,
+}
+
+impl Dock {
+    pub(crate) fn cancel_drag(&mut self) -> bool {
+        self.drag.borrow_mut().take().is_some()
+    }
 }
 
 struct Resize {
@@ -34,7 +40,7 @@ fn ratio_range(axis: usize, size: [f32; 2], limits: &Value) -> Option<(f32, f32)
     if size[cross] < dim(0,cross)?.max(dim(1,cross)?) || size[axis] <= 0. { return None }
     let lo = (dim(0,axis)? + 4.) / size[axis];
     let hi = 1. - (dim(1,axis)? + 4.) / size[axis];
-    (lo <= hi).then_some((lo,hi))
+    (lo < hi).then_some((lo,hi))
 }
 
 fn size_probe(target: Rc<Cell<[f32; 2]>>) -> AnyElement {
@@ -46,29 +52,56 @@ pub(super) fn tree(app: &Backplane, cx: &mut Context<Backplane>, viewer: &Value,
     mut leaves: HashMap<String, AnyElement>, light: bool) -> AnyElement {
     let root = Rc::new(Cell::new([0.;2]));
     let content = branch(app, cx, viewer, &viewer["layout"]["root"], &mut leaves, light, &root);
-    let release = |app: &mut Backplane, e: &MouseUpEvent, _: &mut Window, cx: &mut Context<Backplane>| {
-        if let Some(drag) = app.screens.dock.drag.take() {
-            if app.data["thread"]["id"] == drag.thread {
-                let ratio = drag.at(e.position);
-                if ratio != drag.initial {
+    // Window capture keeps the gesture even when the pointer crosses another pane's hitbox.
+    // The listeners consult the same drag cell as Escape, including before the next repaint.
+    let drag = app.screens.dock.drag.clone();
+    let entity = cx.entity().downgrade();
+    let capture = canvas(|_,_,_| (), move |_, _, window, _| {
+        if let Some(active) = drag.borrow().as_ref() { window.set_window_cursor_style(resize_cursor(active.axis)); }
+        let moving = drag.clone();
+        let notify = entity.clone();
+        window.on_mouse_event(move |event: &MouseMoveEvent, phase, _, cx| {
+            if phase != DispatchPhase::Capture { return; }
+            let mut state = moving.borrow_mut();
+            let Some(drag) = state.as_mut() else { return; };
+            let ratio = drag.at(event.position);
+            let changed = ratio != drag.ratio;
+            drag.ratio = ratio;
+            drop(state);
+            cx.stop_propagation();
+            if changed {
+                let _ = notify.update(cx, |app,cx| { app.ui_epoch += 1; cx.notify(); });
+            }
+        });
+        window.on_mouse_event(move |event: &MouseUpEvent, phase, _, cx| {
+            if phase != DispatchPhase::Capture || event.button != MouseButton::Left { return; }
+            let Some(drag) = drag.borrow_mut().take() else { return; };
+            cx.stop_propagation();
+            let _ = entity.update(cx, |app,cx| {
+                let ratio = drag.at(event.position);
+                if app.data["thread"]["id"] == drag.thread && ratio != drag.initial {
                     let _ = app.tx.try_send(Command::Action("layout-resize".into(),
                         json!({"split":drag.split,"ratio":ratio,"bounds":drag.root}).to_string()));
                 }
-            }
-            app.ui_epoch += 1; cx.notify();
-        }
-    };
-    let surface = div().id("dock-root").relative().size_full().min_w_0().min_h_0().overflow_hidden()
-        .child(size_probe(root)).child(content)
-        .on_mouse_move(cx.listener(|app,e:&MouseMoveEvent,_,cx| {
-            if let Some(drag) = app.screens.dock.drag.as_mut() {
-                let ratio = drag.at(e.position);
-                if drag.ratio != ratio { drag.ratio = ratio; app.ui_epoch += 1; cx.notify(); }
-            }
-        }))
-        .on_mouse_up(MouseButton::Left,cx.listener(release))
-        .on_mouse_up_out(MouseButton::Left,cx.listener(release));
-    surface.into_any_element()
+                app.ui_epoch += 1; cx.notify();
+            });
+        });
+    }).absolute().inset_0();
+    div().id("dock-root").relative().size_full().min_w_0().min_h_0().overflow_hidden()
+        .child(size_probe(root)).child(content).child(capture).into_any_element()
+}
+
+fn resize_cursor(axis: usize) -> CursorStyle {
+    if axis == 0 { CursorStyle::ResizeLeftRight } else { CursorStyle::ResizeUpDown }
+}
+
+fn refusal_tile<'a>(node: &'a Value, focus: &str) -> Option<&'a str> {
+    if node["type"] == "tile" { return node["id"].as_str(); }
+    if node["type"] != "split" { return None; }
+    let a = refusal_tile(&node["a"], focus);
+    if a == Some(focus) { return a; }
+    let b = refusal_tile(&node["b"], focus);
+    if b == Some(focus) { b } else { a.or(b) }
 }
 
 fn branch(app: &Backplane, cx: &mut Context<Backplane>, viewer: &Value, node: &Value,
@@ -78,7 +111,7 @@ fn branch(app: &Backplane, cx: &mut Context<Backplane>, viewer: &Value, node: &V
     let axis = usize::from(node["axis"] == "col");
     let thread = app.data["thread"]["id"].as_str().unwrap_or_default().to_owned();
     let initial = node["ratio"].as_f64().unwrap_or(0.5) as f32;
-    let ratio = app.screens.dock.drag.as_ref().filter(|d| d.thread == thread && d.split == id)
+    let ratio = app.screens.dock.drag.borrow().as_ref().filter(|d| d.thread == thread && d.split == id)
         .map_or(initial, |d| d.ratio);
     let a = branch(app,cx,viewer,&node["a"],leaves,light,root);
     let b = branch(app,cx,viewer,&node["b"],leaves,light,root);
@@ -93,27 +126,39 @@ fn branch(app: &Backplane, cx: &mut Context<Backplane>, viewer: &Value, node: &V
          region().bottom_0().left_0().right_0().h(relative(1. - ratio)).pt(px(4.)))
     };
     let split = id.to_owned();
+    let tile = refusal_tile(node, viewer["layout"]["focus"].as_str().unwrap_or("")).unwrap_or("").to_owned();
     let limits = viewer["splitLimits"][id].clone();
     let root = root.clone();
-    let dragging = app.screens.dock.drag.as_ref().is_some_and(|d| d.split == id && d.thread == thread);
+    let dragging = app.screens.dock.drag.borrow().as_ref().is_some_and(|d| d.split == id && d.thread == thread);
     let bar = div().id(SharedString::from(format!("dock-edge-{id}"))).absolute().flex().items_center().justify_center();
-    let bar = if axis == 0 { bar.left(relative(ratio)).ml(px(-6.)).w(px(12.)).h_full().cursor_col_resize() }
-        else { bar.top(relative(ratio)).mt(px(-6.)).h(px(12.)).w_full().cursor_row_resize() };
+    let bar = if axis == 0 { bar.left(relative(ratio)).ml(px(-4.)).w(px(8.)).h_full() }
+        else { bar.top(relative(ratio)).mt(px(-4.)).h(px(8.)).w_full() };
     let group = SharedString::from(format!("dock-grip-{id}"));
     let accent = theme::color(light,"accent");
     let line = if axis == 0 { div().absolute().w(px(8.)).h_full() } else { div().absolute().h(px(8.)).w_full() };
     let grip = if axis == 0 { div().w(px(3.)).h(px(36.)) } else { div().h(px(3.)).w(px(36.)) };
+    let area = size.clone();
+    let min_sizes = limits.clone();
+    let cursor = canvas(|b, w, _| w.insert_hitbox(b, HitboxBehavior::Normal), move |_, hit, w, _| {
+        let style = if ratio_range(axis, area.get(), &min_sizes).is_some() { resize_cursor(axis) }
+            else { CursorStyle::OperationNotAllowed };
+        w.set_cursor_style(style, &hit);
+    }).absolute().inset_0();
     let bar = bar.group(group.clone()).child(line.bg(theme::color(light,"panel")))
         .child(grip.bg(if dragging { accent } else { theme::color(light,"dim") }).group_hover(group, move |s| s.bg(accent)))
+        .child(cursor)
         .on_mouse_down(MouseButton::Left,cx.listener(move |app,e:&MouseDownEvent,_,cx| {
             let dims = size.get();
             if let Some(range) = ratio_range(axis,dims,&limits) {
-                app.screens.dock.drag = Some(Resize { thread:thread.clone(), split:split.clone(), axis,
+                *app.screens.dock.drag.borrow_mut() = Some(Resize { thread:thread.clone(), split:split.clone(), axis,
                     start:[e.position.x.into(),e.position.y.into()][axis], initial, ratio:initial,
                     extent:dims[axis],range,root:root.get() });
                 app.ui_epoch += 1; cx.notify();
-                cx.stop_propagation();
+            } else {
+                super::tile_menu::show_refusal(app, &thread, &tile,
+                    crate::i18n::t("viewer.layout.refusal.toosmall"), cx);
             }
+            cx.stop_propagation();
         }));
     let bar = if crate::art::rects_on() {
         bar.child(crate::art::probe_rect(format!("splitter:{id}")))

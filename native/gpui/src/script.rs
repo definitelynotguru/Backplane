@@ -119,6 +119,11 @@ fn header_alias(id: &str) -> Option<&str> {
     })
 }
 
+/// A scripted or instrumented window has armed the header registry for this frame.
+pub(crate) fn header_tracking() -> bool {
+    HEADER.with_borrow(|registry| registry.window.is_some())
+}
+
 pub(crate) fn header_present() {
     HEADER.with_borrow_mut(|registry| registry.present = true);
 }

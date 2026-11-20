@@ -18,6 +18,7 @@ pub struct Controls {
 pub struct Identity {
     pub(super) grip: Option<AnyElement>,
     tile_focus: Option<bool>,
+    refusal: Option<String>,
     page: String,
     label: String,
     rel: String,
@@ -33,10 +34,7 @@ impl Identity {
     }
 
     pub(super) fn refusal(&mut self, message: &str) {
-        self.label = message.to_owned();
-        self.rel.clear();
-        self.name.clear();
-        self.version.clear();
+        self.refusal = Some(message.to_owned());
     }
 
     pub fn new(page: &str, facts: &Value) -> Self {
@@ -72,7 +70,7 @@ impl Identity {
                 Some([trs(pane["label"].as_str()?).as_str(), source].join(" · "))
             }).collect::<Vec<_>>().join("\n");
         }
-        Self { grip: None, tile_focus: None, page: page.into(), label, rel, name, version, detail }
+        Self { grip: None, refusal: None, tile_focus: None, page: page.into(), label, rel, name, version, detail }
     }
 
     pub fn with_set_note(mut self, note: &str) -> Self {
@@ -318,6 +316,7 @@ pub fn pane_header(light: bool, mut identity: Identity, tools: Vec<PaneTool<Tool
     let page = identity.page.clone();
     let identity_page = page.clone();
     let tile_focus = identity.tile_focus;
+    let refusal = identity.refusal.take();
     let c = move |n: &str| theme::color(light, n);
     let inner = canvas(move |bounds, w, cx| {
         let scope = controls.tools.iter().find_map(|tool| tool.id.strip_suffix(":add-beside")).unwrap_or(&page);
@@ -341,7 +340,8 @@ pub fn pane_header(light: bool, mut identity: Identity, tools: Vec<PaneTool<Tool
         let room = f32::from(bounds.size.width) - grip_room;
         let mut widths = vec![];
         let mut items = vec![];
-        crate::script::header_present();
+        let tracking = crate::script::header_tracking();
+        if tracking { crate::script::header_present(); }
         let page_count = tools.len();
         for (i, tool) in tools.into_iter().chain(controls.tools).enumerate() {
             let id = tool.id.clone();
@@ -377,7 +377,7 @@ pub fn pane_header(light: bool, mut identity: Identity, tools: Vec<PaneTool<Tool
         let mut actions = Vec::new();
         let mut popups = Vec::new();
         for ((id, label, active, inline, action, popup), show) in items.into_iter().zip(visible) {
-            crate::script::header_action(&page, &id, &label, !show, action.as_ref().map(|(_, p)| p.clone()));
+            if tracking { crate::script::header_action(&page, &id, &label, !show, action.as_ref().map(|(_, p)| p.clone())); }
             if show {
                 strip = strip.child(div().relative().child(inline).children(popup));
                 continue;
@@ -447,7 +447,10 @@ pub fn pane_header(light: bool, mut identity: Identity, tools: Vec<PaneTool<Tool
         row.prepaint_as_root(bounds.origin, size(bounds.size.width.into(), bounds.size.height.into()), w, cx);
         row
     }, |_, mut row, w, cx| row.paint(w, cx)).size_full();
-    with_rect(div().flex_shrink_0(), || format!("pane-header:{}", identity_page)).child(viewer::bar(light).when(tile_focus.is_some(), |d| d.px_1()).child(inner)).into_any_element()
+    with_rect(div().flex_shrink_0().flex().flex_col(), || format!("pane-header:{}", identity_page))
+        .child(viewer::bar(light).when(tile_focus.is_some(), |d| d.px_1()).child(inner))
+        .children(refusal.map(|text| div().px_2().py_1().text_size(crate::scale::tpx(11.)).text_color(c("warn")).child(text)))
+        .into_any_element()
 }
 
 #[cfg(test)]
@@ -479,6 +482,13 @@ mod tests {
         let id = Identity::new("gerbers", &json!({"source":{"rel":"mfg/gerbers","name":"gerbers"}, "set":{"madeAt":123}}));
         assert_eq!(id.text(&id.rel), "Gerbers · mfg/gerbers");
         assert_eq!(id.detail, "1970-01-01");
+    }
+    #[test]
+    fn showing_a_refusal_preserves_the_acted_tiles_identity() {
+        let mut identity = Identity::new("files", &json!({"source":{"rel":"docs/guide","name":"guide"}, "version":"v2"}));
+        identity.refusal("Too small");
+        assert_eq!(identity.text(&identity.rel), "Files · docs/guide · v2");
+        assert_eq!(identity.refusal.as_deref(), Some("Too small"));
     }
     #[test]
     fn cramped_tile_title_only_includes_a_separator_with_source_text() {
