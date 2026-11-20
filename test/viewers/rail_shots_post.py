@@ -367,6 +367,8 @@ def parse_client_log(log_path: Path) -> dict:
                     "rail_drawn_seq": rail_drawn_seq,
                     "probe_rects": probe_rects,
                     "header_controls": {k: v for k, v in controls.items() if k.startswith("pane-tool:") or k == "ui:vs board"},
+                    # the drawn controls of the docking tiles' own headers (`tile:<id>:<verb>`), as measured at this shot (None: no controls measurement at all)
+                    "tile_controls": ({k: {"rect": v.get("rect"), "visible": v.get("visible"), "enabled": v.get("enabled")} for k, v in controls.items() if k.startswith("tile:")} if controls else None),
                     "tiles": list(tiles_current),
                     "splitters": list(splitters_current),
                     "tiles_seq": tiles_seq,

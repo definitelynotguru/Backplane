@@ -39,13 +39,41 @@ def _ok_cap(obs=False, insp=True) -> dict:
     return {"ok": True, "inspect_ok": insp, "obstructed": obs, "obstructions": [{"title": "Dlg"}] if obs else []}
 
 
+def _header_controls(tiles: list[dict]) -> dict:
+    """What a healthy build measures for each tile: a visible close control inside the tile's header band (between its rect top and its body top)."""
+    out = {}
+    for t in tiles:
+        r, b = t.get("rect"), t.get("body")
+        if not (isinstance(r, dict) and isinstance(b, dict)):
+            continue
+        out[f"tile:{t['id']}:close"] = {"rect": {"x": r["x"] + r["w"] - 30, "y": r["y"] + 4, "w": 24, "h": max(b["y"] - r["y"] - 8, 1)}, "visible": True, "enabled": True}
+    return out
+
+
+def _with_controls(parsed: dict) -> dict:
+    """The parsed client log with every shot's tile header controls added where the fixture names none (a copy)."""
+    p = json.loads(json.dumps(parsed))
+    for shot in (p.get("shots") or {}).values():
+        if "tile_controls" not in shot:
+            shot["tile_controls"] = _header_controls(shot.get("tiles") or [])
+    return p
+
+
+def _t4(full_dir, parsed, *a, **kw):
+    return DOCK.evaluate_task4_dock(full_dir, _with_controls(parsed), *a, **kw)
+
+
+def _b7(full_dir, parsed, *a, **kw):
+    return DOCK.evaluate_b7_dock(full_dir, _with_controls(parsed), *a, **kw)
+
+
 class RailDockHarnessTests(unittest.TestCase):
     def test_unavailable_without_tiles_metric_and_b7_scored_over_all_seven(self) -> None:
         with tempfile.TemporaryDirectory() as td:
             fdir = Path(td)
             parsed = {"tiles_metric_seen": False, "shots": {}}
-            self.assertIsNone(DOCK.evaluate_task4_dock(fdir, parsed, {}, True))
-            b7 = DOCK.evaluate_b7_dock(fdir, parsed, {})
+            self.assertIsNone(_t4(fdir, parsed, {}, True))
+            b7 = _b7(fdir, parsed, {})
             self.assertEqual(b7["status"], "unavailable")
             self.assertEqual(b7["checked"], 0)
             self.assertEqual(b7["total"], 7)
@@ -189,20 +217,39 @@ class RailDockHarnessTests(unittest.TestCase):
             cleared = set(caps.keys())
 
             # 1. Clean pass
-            res = DOCK.evaluate_task4_dock(fdir, parsed, caps, True, cleared_shots=cleared)
+            res = _t4(fdir, parsed, caps, True, cleared_shots=cleared)
             self.assertEqual(res["outcome"], "passed", res)
             self.assertTrue(res["one_step_back"])
+
+            # 1b. A usable tile is more than a frame count: the pane's Gerbers tile collapsed to a sliver (the light-minimum capture) is task_failed, an unmeasured
+            # header is unavailable, never passed
+            p_sliver = json.loads(json.dumps(parsed))
+            g_t = p_sliver["shots"]["task4-dock-split"]["tiles"][0]
+            g_t["rect"] = {**g_t["rect"], "w": 8.0}
+            g_t["body"] = {**g_t["body"], "w": 8.0}
+            res_sliver = _t4(fdir, p_sliver, caps, True, cleared_shots=cleared)
+            self.assertEqual(res_sliver["outcome"], "task_failed", res_sliver)
+            self.assertIn("minimum", res_sliver["note"])
+            p_nohdr = json.loads(json.dumps(parsed))
+            for shot in p_nohdr["shots"].values():
+                shot["tile_controls"] = None
+            self.assertEqual(DOCK.evaluate_task4_dock(fdir, p_nohdr, caps, True, cleared_shots=cleared)["outcome"], "unavailable")
+            p_out = json.loads(json.dumps(parsed))
+            p_out["shots"]["task4-dock-split"]["tile_controls"] = {"tile:tile-g:close": {"rect": {"x": 5000.0, "y": 40.0, "w": 24.0, "h": 24.0}, "visible": True}, **_header_controls([p_out["shots"]["task4-dock-split"]["tiles"][1]])}
+            res_out = DOCK.evaluate_task4_dock(fdir, p_out, caps, True, cleared_shots=cleared)
+            self.assertEqual(res_out["outcome"], "task_failed", res_out)
+            self.assertIn("header control", res_out["note"])
 
             # 2. Stale inventory (tiles_seq <= mark_seq) -> unavailable
             p_stale = json.loads(json.dumps(parsed))
             p_stale["shots"]["task4-dock-split"]["tiles_seq"] = 19
-            res_stale = DOCK.evaluate_task4_dock(fdir, p_stale, caps, True, cleared_shots=cleared)
+            res_stale = _t4(fdir, p_stale, caps, True, cleared_shots=cleared)
             self.assertEqual(res_stale["outcome"], "unavailable")
             self.assertIn("stale", res_stale["note"])
 
             # 3. Identical bodies in pixels -> task_failed
             _write_painted_png(fdir / "task4-dock-split.png", [(r_left, (60, 180, 120), True), (r_right, (60, 180, 120), True)])
-            res_ident = DOCK.evaluate_task4_dock(fdir, parsed, caps, True, cleared_shots=cleared)
+            res_ident = _t4(fdir, parsed, caps, True, cleared_shots=cleared)
             self.assertEqual(res_ident["outcome"], "task_failed")
             self.assertIn("differ visually", res_ident["note"])
             _write_painted_png(fdir / "task4-dock-split.png", [(r_left, (60, 180, 120), True), (r_right, (200, 160, 60), True)])
@@ -210,7 +257,7 @@ class RailDockHarnessTests(unittest.TestCase):
             # 4. Missing starting Gerbers shot -> unavailable (never passed)
             p_nostart = json.loads(json.dumps(parsed))
             del p_nostart["shots"]["task4-dock-gerbers"]
-            self.assertEqual(DOCK.evaluate_task4_dock(fdir, p_nostart, caps, True, cleared_shots=cleared)["outcome"], "unavailable")
+            self.assertEqual(_t4(fdir, p_nostart, caps, True, cleared_shots=cleared)["outcome"], "unavailable")
 
             # 4b. Route not exact (an extra or reordered press), or the wrong tile's control -> unavailable, never passed
             for bad in (
@@ -221,24 +268,24 @@ class RailDockHarnessTests(unittest.TestCase):
             ):
                 p_bad = json.loads(json.dumps(parsed))
                 p_bad["presses"]["press:task4-dock-split"] = bad
-                self.assertEqual(DOCK.evaluate_task4_dock(fdir, p_bad, caps, True, cleared_shots=cleared)["outcome"], "unavailable")
+                self.assertEqual(_t4(fdir, p_bad, caps, True, cleared_shots=cleared)["outcome"], "unavailable")
             # 4c. Outer rect missing while the body is present -> unavailable (not a product failure)
             p_rect = json.loads(json.dumps(parsed))
             del p_rect["shots"]["task4-dock-split"]["tiles"][0]["rect"]
-            self.assertEqual(DOCK.evaluate_task4_dock(fdir, p_rect, caps, True, cleared_shots=cleared)["outcome"], "unavailable")
+            self.assertEqual(_t4(fdir, p_rect, caps, True, cleared_shots=cleared)["outcome"], "unavailable")
 
             # 4d. A missing rect in the INITIAL or the RETURN shot is a width gap -> unavailable, never width_restored=False -> task_failed
             for shot in ("task4-dock-gerbers", "task4-dock-back"):
                 p_w = json.loads(json.dumps(parsed))
                 del p_w["shots"][shot]["tiles"][0]["rect"]
-                self.assertEqual(DOCK.evaluate_task4_dock(fdir, p_w, caps, True, cleared_shots=cleared)["outcome"], "unavailable", shot)
+                self.assertEqual(_t4(fdir, p_w, caps, True, cleared_shots=cleared)["outcome"], "unavailable", shot)
             # ... while a measured narrow return width still fails
             p_narrow = json.loads(json.dumps(parsed))
             p_narrow["shots"]["task4-dock-back"]["tiles"][0]["rect"] = {"x": 753, "y": 36, "w": 300, "h": 835}
-            self.assertEqual(DOCK.evaluate_task4_dock(fdir, p_narrow, caps, True, cleared_shots=cleared)["outcome"], "task_failed")
+            self.assertEqual(_t4(fdir, p_narrow, caps, True, cleared_shots=cleared)["outcome"], "task_failed")
 
             # 5. Not in per-shot privacy clearance -> harness_failed (fail-closed)
-            self.assertEqual(DOCK.evaluate_task4_dock(fdir, parsed, caps, True, cleared_shots={"task4-dock-gerbers"})["outcome"], "harness_failed")
+            self.assertEqual(_t4(fdir, parsed, caps, True, cleared_shots={"task4-dock-gerbers"})["outcome"], "harness_failed")
 
     def test_task4_budget_two_route_steps_and_exact_pointer_chain(self) -> None:
         shift = DOCK.build_task4_dock_steps(route="shift")
@@ -306,27 +353,27 @@ class RailDockHarnessTests(unittest.TestCase):
 
             shift_ev = [{"id": "rail:Board", "found": True, "pointer": True, "modifier": "shift", "button": "left", "seq": 21}]
             parsed, caps = route("task4-dock", shift_ev)
-            res = DOCK.evaluate_task4_dock(fdir, parsed, caps, True, cleared_shots=set(caps), route="shift")
+            res = _t4(fdir, parsed, caps, True, cleared_shots=set(caps), route="shift")
             self.assertEqual(res["outcome"], "passed", res)
             self.assertEqual(res["presses"], ["rail:Gerbers", "rail:Board"], "two presses: within the budget of two")
             # the same inventory with the plain (unmodified) pointer is not the route: never a pass
             plain = [{**shift_ev[0], "modifier": "none"}]
             parsed_plain, _ = route("task4-dock", plain)
-            self.assertEqual(DOCK.evaluate_task4_dock(fdir, parsed_plain, caps, True, cleared_shots=set(caps), route="shift")["outcome"], "unavailable")
+            self.assertEqual(_t4(fdir, parsed_plain, caps, True, cleared_shots=set(caps), route="shift")["outcome"], "unavailable")
             # the middle-click route is the alternate
             mid = [{**shift_ev[0], "modifier": "none", "button": "middle"}]
             parsed_mid, _ = route("task4-dock", mid)
-            self.assertEqual(DOCK.evaluate_task4_dock(fdir, parsed_mid, caps, True, cleared_shots=set(caps), route="middle")["outcome"], "passed")
+            self.assertEqual(_t4(fdir, parsed_mid, caps, True, cleared_shots=set(caps), route="middle")["outcome"], "passed")
             # the menu route is measured on its own (three presses) and is an extra check, never the Task 4 score
             menu_ev = [{"id": "tile:tile-g:add-beside", "found": True, "seq": 21}, {"id": "add-beside:board", "found": True, "seq": 22}]
             parsed_menu, caps_menu = route("task4-menu", menu_ev)
-            chk = DOCK.task4_menu_route_check(fdir, parsed_menu, caps_menu, True, cleared_shots=set(caps_menu))
+            chk = DOCK.task4_menu_route_check(fdir, _with_controls(parsed_menu), caps_menu, True, cleared_shots=set(caps_menu))
             self.assertEqual((chk["id"], chk["outcome"]), ("full/task4-menu-route", "passed"), chk)
             self.assertEqual(chk["evidence"]["presses"], ["rail:Gerbers", "tile:tile-g:add-beside", "add-beside:board"])
             parsed_bad, caps_bad = route("task4-menu", [menu_ev[0]])
-            self.assertEqual(DOCK.task4_menu_route_check(fdir, parsed_bad, caps_bad, True, cleared_shots=set(caps_bad))["outcome"], "unavailable")
+            self.assertEqual(DOCK.task4_menu_route_check(fdir, _with_controls(parsed_bad), caps_bad, True, cleared_shots=set(caps_bad))["outcome"], "unavailable")
             # a run without the menu route has no such check
-            self.assertIsNone(DOCK.task4_menu_route_check(fdir, parsed, caps, True, cleared_shots=set(caps)))
+            self.assertIsNone(DOCK.task4_menu_route_check(fdir, _with_controls(parsed), caps, True, cleared_shots=set(caps)))
 
     def test_pointer_metric_modifier_and_button_reach_the_press_records(self) -> None:
         ev = {"event": "pointer", "id": "rail:Board", "modifier": "shift", "button": "left", "hit_rect": True, "dispatched": True, "x": 1.0, "y": 2.0, "error": None}
@@ -336,6 +383,66 @@ class RailDockHarnessTests(unittest.TestCase):
             parsed = P.parse_client_log(log)
             p = parsed["presses"]["press:t"][0]
         self.assertEqual((p["modifier"], p["button"], p["found"], p["pointer"]), ("shift", "left", True, True))
+
+    ORIGINAL_TILES = [
+        {"id": "t1", "kind": "gerbers", "source": "mfg/gerbers", "overlay": None, "focused": False, "rect": {"x": 406.0, "y": 46.0, "w": 8.0, "h": 388.0}, "body": {"x": 406.0, "y": 86.0, "w": 8.0, "h": 348.0}, "frame": 14},
+        {"id": "t2", "kind": "board", "source": "ecc83-pp.kicad_pcb", "overlay": None, "focused": True, "rect": {"x": 406.0, "y": 444.0, "w": 317.0, "h": 388.0}, "body": {"x": 406.0, "y": 484.0, "w": 317.0, "h": 348.0}, "frame": 14},
+    ]
+    ORIGINAL_SPLITTERS = [{"id": "s1", "rect": {"x": 437.0, "y": 433.0, "w": 287.0, "h": 12.0}, "axis": "y"}]
+    # the controls of the original capture (light-minimum-painted): Gerbers' header controls drawn at x 410..489, outside its 8 px rect
+    ORIGINAL_CONTROLS = {
+        "tile:t1:add-beside": {"rect": {"x": 432.0, "y": 51.0, "w": 30.0, "h": 30.0}, "visible": True},
+        "tile:t1:close": {"rect": {"x": 464.0, "y": 49.0, "w": 25.0, "h": 33.0}, "visible": True},
+        "tile:t1:focus": {"rect": {"x": 410.0, "y": 49.0, "w": 18.0, "h": 33.0}, "visible": True},
+        "tile:t2:close": {"rect": {"x": 694.0, "y": 447.0, "w": 25.0, "h": 33.0}, "visible": True},
+        "tile:t2:focus": {"rect": {"x": 410.0, "y": 447.0, "w": 18.0, "h": 33.0}, "visible": True},
+    }
+
+    def test_a_tile_collapsed_to_a_sliver_is_not_a_usable_tile_even_with_frames_and_a_body(self) -> None:
+        fails, missing = DOCK.usable_tile_fails(self.ORIGINAL_TILES, self.ORIGINAL_SPLITTERS, self.ORIGINAL_CONTROLS)
+        self.assertEqual(missing, [])
+        text = "; ".join(fails)
+        for need in ("cross-axis span 8px", "width 8px is under the 180px minimum", "no measured header control"):
+            self.assertIn(need, text)
+        # the fixed build: both tiles span 317 px and every header control sits in its own header
+        fixed = json.loads(json.dumps(self.ORIGINAL_TILES))
+        fixed[0]["rect"]["w"] = fixed[0]["body"]["w"] = 317.0
+        controls = {"tile:t1:close": {"rect": {"x": 690.0, "y": 49.0, "w": 25.0, "h": 33.0}, "visible": True}, "tile:t2:close": self.ORIGINAL_CONTROLS["tile:t2:close"]}
+        self.assertEqual(DOCK.usable_tile_fails(fixed, self.ORIGINAL_SPLITTERS, controls), ([], []))
+        # an entry of the More menu is not a header control, even drawn inside the band; the visible glyph is
+        only_more = {**controls, "tile:t1:close": {"rect": {"x": 690.0, "y": 49.0, "w": 25.0, "h": 33.0}, "visible": False},
+                     "tile:t1:more:add-beside": {"rect": {"x": 690.0, "y": 49.0, "w": 25.0, "h": 33.0}, "visible": True}}
+        self.assertTrue(DOCK.usable_tile_fails(fixed, self.ORIGINAL_SPLITTERS, only_more)[0])
+        glyph = {**controls, "tile:t1:close": {"rect": {"x": 690.0, "y": 49.0, "w": 25.0, "h": 33.0}, "visible": False},
+                 "tile:t1:add-beside": {"rect": {"x": 660.0, "y": 49.0, "w": 25.0, "h": 33.0}, "visible": True}}
+        self.assertEqual(DOCK.usable_tile_fails(fixed, self.ORIGINAL_SPLITTERS, glyph), ([], []))
+        # a tile whose header controls are not measured is unmeasured, never a pass
+        fails, missing = DOCK.usable_tile_fails(fixed, self.ORIGINAL_SPLITTERS, None)
+        self.assertEqual(fails, [])
+        self.assertTrue(missing)
+        # a hidden or zero-size control is not a drawn one
+        hidden = {**controls, "tile:t1:close": {"rect": {"x": 690.0, "y": 49.0, "w": 0.0, "h": 33.0}, "visible": True}}
+        self.assertTrue(DOCK.usable_tile_fails(fixed, self.ORIGINAL_SPLITTERS, hidden)[0])
+        # side by side: the height is the shared span; a tile under the minimum in either direction fails
+        side = [{"id": "a", "rect": {"x": 0.0, "y": 0.0, "w": 300.0, "h": 400.0}, "body": {"x": 0.0, "y": 40.0, "w": 300.0, "h": 360.0}},
+                {"id": "b", "rect": {"x": 308.0, "y": 0.0, "w": 120.0, "h": 400.0}, "body": {"x": 308.0, "y": 40.0, "w": 120.0, "h": 360.0}}]
+        sc = {f"tile:{i}:close": {"rect": {"x": r + 4, "y": 4.0, "w": 20.0, "h": 30.0}, "visible": True} for i, r in (("a", 0.0), ("b", 308.0))}
+        fails, _ = DOCK.usable_tile_fails(side, [{"id": "s", "axis": "x", "rect": {"x": 300.0, "y": 0.0, "w": 8.0, "h": 400.0}}], sc)
+        self.assertTrue(any("tile b width 120px" in f for f in fails), fails)
+        # one tile is nothing to compare
+        self.assertEqual(DOCK.usable_tile_fails(side[:1], [], None), ([], []))
+
+    def test_the_tile_header_controls_reach_the_shot_record(self) -> None:
+        ev = {"event": "controls", "controls": [{"id": "tile:t1:close", "label": "Close", "rect": {"x": 464.0, "y": 49.0, "w": 25.0, "h": 33.0}, "enabled": True, "visible": True},
+                                               {"id": "rail:Board", "label": "Board", "rect": {"x": 727.0, "y": 53.0, "w": 69.0, "h": 60.0}, "enabled": True, "visible": True}]}
+        with tempfile.TemporaryDirectory() as td:
+            log = Path(td) / "client.log"
+            log.write_text("GPUI_METRIC " + json.dumps(ev) + "\nGPUI_METRIC " + json.dumps({"event": "shot-ready", "name": "b7-add-bottom", "state": "ready", "settled": True, "viewer": {}}) + "\n", encoding="utf-8")
+            rec = P.parse_client_log(log)["shots"]["b7-add-bottom"]
+            self.assertEqual(sorted(rec["tile_controls"]), ["tile:t1:close"])
+            self.assertEqual(rec["tile_controls"]["tile:t1:close"]["rect"]["x"], 464.0)
+            log.write_text("GPUI_METRIC " + json.dumps({"event": "shot-ready", "name": "b7-add-bottom", "state": "ready", "settled": True, "viewer": {}}) + "\n", encoding="utf-8")
+            self.assertIsNone(P.parse_client_log(log)["shots"]["b7-add-bottom"]["tile_controls"], "no controls measurement at all")
 
     def test_b7_all_seven_checks_and_missing_pane_geometry_and_stale_and_string_false(self) -> None:
         with tempfile.TemporaryDirectory() as td:
@@ -414,7 +521,7 @@ class RailDockHarnessTests(unittest.TestCase):
                 "refusals": {"b7:overlay-incompatible": [{"code": "incompatibleOverlay", "text": "Those views cannot be overlaid", "seq": 122}]},
             }
 
-            b7 = DOCK.evaluate_b7_dock(fdir, parsed, caps, cleared_shots=cleared)
+            b7 = _b7(fdir, parsed, caps, cleared_shots=cleared)
             self.assertEqual(b7["status"], "measured", b7)
             self.assertEqual(b7["clean"], 7)
 
@@ -422,39 +529,39 @@ class RailDockHarnessTests(unittest.TestCase):
             p_nogeom = json.loads(json.dumps(parsed))
             p_nogeom["shots"]["b7-close-right"]["layout"] = {}
             p_nogeom["shots"]["b7-maximized"]["layout"] = {}
-            b7_ng = DOCK.evaluate_b7_dock(fdir, p_nogeom, caps, cleared_shots=cleared)
+            b7_ng = _b7(fdir, p_nogeom, caps, cleared_shots=cleared)
             self.assertEqual(b7_ng["checks"]["close"]["status"], "unavailable")
             self.assertEqual(b7_ng["checks"]["maximize_restore"]["status"], "unavailable")
 
             # String "false" in drag.ok -> resize_drag unavailable
             p_strfalse = json.loads(json.dumps(parsed))
             p_strfalse["drags"]["b7:resize-drag"] = [{"ok": "false", "splitter": "sp-x", "from": [1061, 420], "to": [975, 420]}]
-            b7_sf = DOCK.evaluate_b7_dock(fdir, p_strfalse, caps, cleared_shots=cleared)
+            b7_sf = _b7(fdir, p_strfalse, caps, cleared_shots=cleared)
             self.assertEqual(b7_sf["checks"]["resize_drag"]["status"], "unavailable")
 
             # Stale inventory: tiles drawn BEFORE the delivered press (carried forward) -> unavailable, per transition
             p_stale = json.loads(json.dumps(parsed))
             p_stale["shots"]["b7-after-swap"]["tiles_seq"] = 60  # the swap press was delivered at seq 61
-            b7_st = DOCK.evaluate_b7_dock(fdir, p_stale, caps, cleared_shots=cleared)
+            b7_st = _b7(fdir, p_stale, caps, cleared_shots=cleared)
             self.assertEqual(b7_st["checks"]["swap"]["status"], "unavailable")
             self.assertIn("stale", b7_st["checks"]["swap"]["note"])
 
             # A transition whose press was never delivered is not fresh either (the mark alone is not enough)
             p_nopress = json.loads(json.dumps(parsed))
             p_nopress["presses"]["b7:maximize"][0]["found"] = False
-            self.assertEqual(DOCK.evaluate_b7_dock(fdir, p_nopress, caps, cleared_shots=cleared)["checks"]["maximize_restore"]["status"], "unavailable")
+            self.assertEqual(_b7(fdir, p_nopress, caps, cleared_shots=cleared)["checks"]["maximize_restore"]["status"], "unavailable")
 
             # Drag naming a splitter that is not in the drawn inventory, or moving across its axis, fails (measured)
             p_wrong = json.loads(json.dumps(parsed))
             p_wrong["drags"]["b7:resize-drag"][0]["splitter"] = "ghost"
-            self.assertIs(DOCK.evaluate_b7_dock(fdir, p_wrong, caps, cleared_shots=cleared)["checks"]["resize_drag"]["passed"], False)
+            self.assertIs(_b7(fdir, p_wrong, caps, cleared_shots=cleared)["checks"]["resize_drag"]["passed"], False)
             p_across = json.loads(json.dumps(parsed))
             p_across["drags"]["b7:resize-drag"][0]["to"] = [1061, 300]
-            self.assertIs(DOCK.evaluate_b7_dock(fdir, p_across, caps, cleared_shots=cleared)["checks"]["resize_drag"]["passed"], False)
+            self.assertIs(_b7(fdir, p_across, caps, cleared_shots=cleared)["checks"]["resize_drag"]["passed"], False)
 
             # Refusal: hub layout not observed -> unavailable; raw code in the human text -> failed
             def _ref(p):
-                return DOCK.evaluate_b7_dock(fdir, p, caps, cleared_shots=cleared)["checks"]["incompatible_overlay_refusal"]
+                return _b7(fdir, p, caps, cleared_shots=cleared)["checks"]["incompatible_overlay_refusal"]
             p_nolay = json.loads(json.dumps(parsed))
             del p_nolay["shots"]["b7-overlay-incompat"]["viewer"]["layout"]
             self.assertEqual(_ref(p_nolay)["status"], "unavailable")
@@ -498,15 +605,15 @@ class RailDockHarnessTests(unittest.TestCase):
             self.assertIs(_ref(p_chg)["passed"], False)
             p_raw = json.loads(json.dumps(parsed))
             p_raw["refusals"]["b7:overlay-incompatible"][0]["text"] = "incompatibleOverlay"
-            self.assertIs(DOCK.evaluate_b7_dock(fdir, p_raw, caps, cleared_shots=cleared)["checks"]["incompatible_overlay_refusal"]["passed"], False)
+            self.assertIs(_b7(fdir, p_raw, caps, cleared_shots=cleared)["checks"]["incompatible_overlay_refusal"]["passed"], False)
 
             # Identical bodies in pixels (two tiles painted alike) -> add_beside_directions fails
             _write_painted_png(fdir / "b7-add-right.png", [(r_l, c_brd, True), (r_r, c_brd, True)])
-            b7_id = DOCK.evaluate_b7_dock(fdir, parsed, caps, cleared_shots=cleared)
+            b7_id = _b7(fdir, parsed, caps, cleared_shots=cleared)
             self.assertIs(b7_id["checks"]["add_beside_directions"]["passed"], False)
 
             # Per-shot privacy clearance is consulted
-            self.assertEqual(DOCK.evaluate_b7_dock(fdir, parsed, caps, cleared_shots=set())["checks"]["swap"]["status"], "unavailable")
+            self.assertEqual(_b7(fdir, parsed, caps, cleared_shots=set())["checks"]["swap"]["status"], "unavailable")
 
             # Scored over all seven: one unmeasured check is not earned
             self.assertEqual(b7_ng["total"], 7)

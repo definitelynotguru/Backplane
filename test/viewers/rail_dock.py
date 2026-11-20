@@ -508,6 +508,65 @@ def build_b7_steps(settle_timeout_ms: int = 15000) -> list[dict]:
     return steps
 
 
+MIN_TILE_SPAN_PX = 180.0  # the hub's own minimum tile (`present/layout.rs` MIN_TILE_PX): a tile narrower or shorter than this is not usable
+SPAN_TOLERANCE = 0.05
+
+
+def usable_tile_fails(tiles: list[dict], splitters: list[dict], tile_controls: dict | None) -> tuple[list[str], list[str]]:
+    """What makes an accepted tile unusable, from the measured inventory alone: `(fails, missing)`.
+
+    A positive frame count or a body area is not a usable tile: the tile of the original light-minimum capture was a stacked Gerbers tile 8 px wide (rect and body
+    x 406, w 8) beside a 317 px Board tile, with its header controls drawn to the right of it, outside its rect. Every tile of two or more must have:
+    - both outer spans at least `MIN_TILE_SPAN_PX` (along and across the splitter), and, for the tiles of one split, the cross-axis span (the width of tiles stacked
+      by a `y` splitter, the height of tiles side by side by an `x` one) shared: within 5 % of the widest;
+    - a body as wide as its tile (within 5 %), below a header band of positive height measured as `body.y - rect.y`;
+    - a measured header control of its own (`tile:<id>:<verb>`, visible, positive rect; `tile:<id>:more:<verb>` is a menu entry, not a header control) inside that header band and the tile's rect.
+    `missing` names what the capture does not carry (no controls measurement at all): the caller says unavailable, never passed.
+    """
+    fails: list[str] = []
+    missing: list[str] = []
+    if len(tiles) < 2:
+        return fails, missing
+    axes = {str(sp.get("axis") or "") for sp in splitters}
+    cross = "w" if "y" in axes and "x" not in axes else "h" if "x" in axes and "y" not in axes else None
+    rects = {str(t.get("id") or ""): _rect_tuple(t.get("rect")) for t in tiles}
+    bodies = {str(t.get("id") or ""): _rect_tuple(t.get("body")) for t in tiles}
+    idx = {"w": 2, "h": 3}
+    if cross is not None and all(rects.values()):
+        widest = max(r[idx[cross]] for r in rects.values() if r)
+        for tid, r in rects.items():
+            if r and r[idx[cross]] < widest * (1 - SPAN_TOLERANCE):
+                fails.append(f"tile {tid} cross-axis span {r[idx[cross]]:g}px is not the {widest:g}px the split's other tile has")
+    for tid, r in rects.items():
+        b = bodies.get(tid)
+        if r is None or b is None:
+            missing.append(f"tile {tid}: rect or body not measured")
+            continue
+        for name, v in (("width", r[2]), ("height", r[3])):
+            if v < MIN_TILE_SPAN_PX:
+                fails.append(f"tile {tid} {name} {v:g}px is under the {MIN_TILE_SPAN_PX:g}px minimum")
+        if b[2] < r[2] * (1 - SPAN_TOLERANCE):
+            fails.append(f"tile {tid} body width {b[2]:g}px does not cover its tile's {r[2]:g}px")
+        if b[1] - r[1] <= 0:
+            fails.append(f"tile {tid} has no header band (body starts at {b[1]:g}, tile at {r[1]:g})")
+        if tile_controls is None:
+            continue
+        # a header control is `tile:<id>:<verb>` (the visible glyphs, e.g. `add-beside`); `tile:<id>:more:<verb>` is an entry inside the More menu, not a header control
+        mine = {k: c for k, c in tile_controls.items() if k.startswith(f"tile:{tid}:") and ":" not in k[len(f"tile:{tid}:"):]}
+        inside = []
+        for k, c in mine.items():
+            cr = _rect_tuple((c or {}).get("rect"))
+            if cr is None or (c or {}).get("visible") is False or cr[2] <= 0 or cr[3] <= 0:
+                continue
+            if cr[0] >= r[0] - 1 and cr[0] + cr[2] <= r[0] + r[2] + 1 and cr[1] >= r[1] - 1 and cr[1] + cr[3] <= b[1] + 1:
+                inside.append(k)
+        if not inside:
+            fails.append(f"tile {tid}: no measured header control inside its header band and rect")
+    if tile_controls is None:
+        missing.append("header controls were not measured")
+    return fails, missing
+
+
 def evaluate_task4_dock(
     full_dir: Path,
     parsed_full: dict,
@@ -640,6 +699,9 @@ def evaluate_task4_dock(
         }
     if len(rects) == 2 and not _rects_disjoint(rects[0], rects[1]):
         fails.append("tile rects overlap")
+    # an accepted tile is usable: spans, body coverage, a measured header band and header control (frame counts and body area alone prove nothing)
+    span_fails, span_missing = usable_tile_fails(tiles, splitters, s_split.get("tile_controls") if "tile_controls" in s_split else None)
+    fails.extend(span_fails)
     if any(b is None for b in body_rects):
         return {
             "outcome": "unavailable",
@@ -721,6 +783,9 @@ def evaluate_task4_dock(
                     f"src={b_src!r} vs {init_src!r}, width_ok={width_restored}, body={b_body})"
                 )
 
+    if not fails and span_missing:
+        return {"outcome": "unavailable", "note": "; ".join(span_missing), "one_step_back": back_ok, "found": found_route, "presses": observed_presses,
+                "evidence": {"tiles": tiles, "splitters": splitters, "unmeasured": span_missing}}
     if not fails and back_ok:
         outcome = "passed"
     elif not fails and back_unavailable:
@@ -889,11 +954,16 @@ def evaluate_b7_dock(
         b1 = tile_body_non_flat(png, by_kind["board"].get("body"))
         b2 = tile_body_non_flat(png, by_kind["schematic"].get("body"))
         diff12 = tile_bodies_pixel_diff(png, by_kind["board"].get("body"), png, by_kind["schematic"].get("body"))
-        if pos_ok and sp_ok and b1 is True and b2 is True and (diff12 is not None and diff12 > 0.01):
-            dir_results[side] = True
+        usable_fails, usable_missing = usable_tile_fails(ts, shots[sname].get("splitters") or [], shots[sname].get("tile_controls") if "tile_controls" in shots[sname] else None)
+        if pos_ok and sp_ok and b1 is True and b2 is True and (diff12 is not None and diff12 > 0.01) and not usable_fails:
+            if usable_missing:
+                dir_results[side] = "unavailable"
+                dir_notes.append(f"{side}: {'; '.join(usable_missing)}")
+            else:
+                dir_results[side] = True
         else:
             dir_results[side] = False
-            dir_notes.append(f"{side}: pos_ok={pos_ok} sp_ok={sp_ok} bodies=({b1},{b2}) diff={diff12}")
+            dir_notes.append(f"{side}: pos_ok={pos_ok} sp_ok={sp_ok} bodies=({b1},{b2}) diff={diff12}" + (f" unusable: {'; '.join(usable_fails)}" if usable_fails else ""))
 
     if any(v is False for v in dir_results.values()):
         checks["add_beside_directions"] = _rec("measured", False, "; ".join(dir_notes), {"directions": dir_results})
