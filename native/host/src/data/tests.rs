@@ -1284,7 +1284,7 @@ async fn viewer_layout_over_a_socket_is_per_device_pushed_and_refuses_in_code_ke
     assert!(r["result"].get("watch").is_none(), "{r}");
     assert_eq!(plots.watched_keys(ca).len(), 1);
     // an invalid ordinary watch changes nothing: the connection still holds its set (the next valid one still lets it go)
-    assert_eq!(ask(&mut a, 25, "viewer.watch", json!({"thread":"tl","kind":"zzz"})).await["ok"], false);
+    assert_eq!(ask(&mut a, 25, "viewer.watch", json!({"thread":"tl","kind":"board","path":"../x"})).await["ok"], false);
     let r = ask(&mut a, 26, "viewer.layout.act", json!({"thread":"tl","op":"focus","tile":files,"bounds":[390,844]})).await;
     assert!(r["result"].get("watch").is_some(), "{r}");
     // an ordinary watch lets the set go through `leave`, then replaces it as usual
